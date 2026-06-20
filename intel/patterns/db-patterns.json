@@ -1,0 +1,21 @@
+{
+  "schema": "wp-warden.patterns.db.v1",
+  "rules": [
+    {
+      "id": "DB_OPTION_SCRIPT_TAG_001",
+      "enabled": true,
+      "severity": "high",
+      "scope": "wp_options",
+      "pattern": "<script",
+      "description": "Script tag found in option value."
+    },
+    {
+      "id": "DB_OPTION_PHP_OBFUSCATION_001",
+      "enabled": true,
+      "severity": "critical",
+      "scope": "wp_options",
+      "pattern": "base64_decode|gzinflate|eval\\s*\\(",
+      "description": "PHP obfuscation fragment found in option value."
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "id": "default",
+  "description": "Default WP Warden policy. Noninteractive runs report only; interactive runs may quarantine or repair only when --apply is supplied.",
+  "defaults": {
+    "mode": "report_only",
+    "require_apply_for_changes": true,
+    "noninteractive_remediation": false,
+    "hash_algorithms": ["md5", "sha256"],
+    "report_format": "json"
+  },
+  "paths": {
+    "skip_relative_prefixes": [
+      "wp-content/cache/",
+      "wp-content/upgrade/",
+      "wp-content/languages/"
+    ],
+    "suspicious_upload_extensions": [
+      "php",
+      "phtml",
+      "php3",
+      "php4",
+      "php5",
+      "php7",
+      "phar",
+      "pl",
+      "py",
+      "sh",
+      "cgi"
+    ],
+    "suspicious_writable_dirs": [
+      "/tmp",
+      "/var/tmp",
+      "/dev/shm"
+    ]
+  },
+  "db": {
+    "audit_admins": true,
+    "known_admins": []
+  },
+  "severity": {
+    "php_in_uploads": "critical",
+    "modified_official_core": "critical",
+    "modified_official_plugin": "high",
+    "modified_official_theme": "high",
+    "unknown_binary_in_webroot": "critical",
+    "rogue_admin": "critical",
+    "unknown_cron": "medium",
+    "unknown_process": "medium"
+  }
+}

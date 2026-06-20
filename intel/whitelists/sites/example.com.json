@@ -1,0 +1,7 @@
+{
+  "schema": "wp-warden.whitelist.site.v1",
+  "site_id": "example.com",
+  "file_hashes": [],
+  "processes": [],
+  "crons": []
+}

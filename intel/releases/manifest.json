@@ -1,0 +1,19 @@
+{
+    "schema":  "wp-warden.release-manifest.v1",
+    "name":  "wp-warden-intel",
+    "version":  "0.1.8",
+    "created_at":  "2026-06-20T08:37:27Z",
+    "policy_versions":  {
+                            "default":  "0.1.0",
+                            "apiscp":  "0.1.0",
+                            "cwp":  "0.1.0"
+                        },
+    "bundle":  {
+                   "format":  "zip",
+                   "sha256":  "3afc9053c164abf94eff67c7429326739e60999ff53b9b6b0532372123e7d1ec",
+                   "url":  "wp-warden-intel-0.1.8.zip"
+               },
+    "notes":  [
+                  "Initial scaffold for centralized checksums, whitelists, detection patterns, and server policies."
+              ]
+}

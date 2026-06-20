@@ -1,0 +1,32 @@
+{
+  "schema": "wp-warden.patterns.process.v1",
+  "rules": [
+    {
+      "id": "PROC_EXEC_FROM_TMP_001",
+      "enabled": true,
+      "severity": "critical",
+      "match": {
+        "exe_prefixes": ["/tmp/", "/var/tmp/", "/dev/shm/"]
+      },
+      "description": "Process executable is running from a writable temporary directory."
+    },
+    {
+      "id": "PROC_DELETED_EXE_001",
+      "enabled": true,
+      "severity": "critical",
+      "match": {
+        "exe_contains": " (deleted)"
+      },
+      "description": "Process executable has been deleted but is still running."
+    },
+    {
+      "id": "PROC_SUSPICIOUS_CMDLINE_001",
+      "enabled": true,
+      "severity": "high",
+      "match": {
+        "cmdline_regex": "(curl|wget).*(/tmp|/dev/shm|base64|sh\\s)"
+      },
+      "description": "Command line resembles downloader or shell staging activity."
+    }
+  ]
+}

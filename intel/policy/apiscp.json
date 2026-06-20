@@ -1,0 +1,17 @@
+{
+  "id": "apiscp",
+  "inherits": "default",
+  "description": "ApisCP-oriented policy. Intended for per-site account scans with local reports and central intel ZIP updates.",
+  "server_profile": {
+    "panel": "ApisCP",
+    "expected_user_model": "site_account_user",
+    "webroots": [
+      "/home/*/public_html",
+      "/home/virtual/site*/fst/var/www/html"
+    ]
+  },
+  "cron": {
+    "report_only": true,
+    "suggested_schedule": "17 3 * * *"
+  }
+}

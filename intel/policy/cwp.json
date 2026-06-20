@@ -1,0 +1,16 @@
+{
+  "id": "cwp",
+  "inherits": "default",
+  "description": "CWP-oriented policy. Intended for user home public_html scans and host persistence review.",
+  "server_profile": {
+    "panel": "CWP",
+    "expected_user_model": "account_user",
+    "webroots": [
+      "/home/*/public_html"
+    ]
+  },
+  "cron": {
+    "report_only": true,
+    "suggested_schedule": "43 3 * * *"
+  }
+}
