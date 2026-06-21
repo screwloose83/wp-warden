@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.24';
+const WP_WARDEN_VERSION = '0.1.25';
 
 $opts = parse_args($argv);
 @ini_set('pcre.backtrack_limit', '500000');
@@ -1191,8 +1191,17 @@ function checksum_string($value): ?string {
 function scan_tree(string $root, array $intel, array $coreChecksums, array $componentChecksums): void {
     global $maxSizeMb, $verifyAll, $state, $debugProgress;
 
+    $rootNorm = normalize_path(realpath($root) ?: $root);
+    $directory = new RecursiveDirectoryIterator($rootNorm, FilesystemIterator::SKIP_DOTS);
+    $filter = new RecursiveCallbackFilterIterator($directory, function ($current) use ($rootNorm, $intel) {
+        $rel = fast_relative_path($rootNorm, $current->getPathname());
+        if ($current->isDir() && should_skip_path($rel . '/', $intel)) {
+            return false;
+        }
+        return true;
+    });
     $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS)
+        $filter
     );
 
     foreach ($iterator as $file) {
@@ -1201,7 +1210,7 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
         }
 
         $path = $file->getPathname();
-        $rel = relative_path($root, $path);
+        $rel = fast_relative_path($rootNorm, $path);
         stats_inc('files_seen');
         if (($state['summary']['files_seen'] % 1000) === 0) {
             $findingCount = count($state['findings']);
@@ -2031,6 +2040,18 @@ function relative_path(string $root, string $path): string {
     $pathNorm = normalize_path($pathReal);
     if (strpos($pathNorm, $rootNorm) === 0) {
         return normalize_relative(substr($pathNorm, strlen($rootNorm)));
+    }
+    return normalize_relative($pathNorm);
+}
+
+function fast_relative_path(string $rootNorm, string $path): string {
+    $pathNorm = normalize_path($path);
+    $rootNorm = rtrim(normalize_path($rootNorm), '/');
+    if (strpos($pathNorm, $rootNorm . '/') === 0) {
+        return normalize_relative(substr($pathNorm, strlen($rootNorm) + 1));
+    }
+    if ($pathNorm === $rootNorm) {
+        return '';
     }
     return normalize_relative($pathNorm);
 }
