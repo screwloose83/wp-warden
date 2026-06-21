@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.27';
+const WP_WARDEN_VERSION = '0.1.28';
 
 $opts = parse_args($argv);
 @ini_set('pcre.backtrack_limit', '500000');
@@ -940,8 +940,8 @@ function repair_from_package(array $package, string $relativePath, string $absPa
         'sha256' => strtolower(hash('sha256', $data)),
     ];
     if (!hash_matches($candidate, $expected)) {
-        say("[REPAIR-FAIL] Package file checksum did not match intel for $relativePath", true);
-        return false;
+        say("[REPAIR] Package file checksum did not match intel for $relativePath; trying SVN fallback", true);
+        return repair_from_svn_file($package, $relativePath, $absPath, $expected);
     }
 
     $backup = backup_before_repair($absPath, $relativePath);
