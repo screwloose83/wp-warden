@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.25';
+const WP_WARDEN_VERSION = '0.1.26';
 
 $opts = parse_args($argv);
 @ini_set('pcre.backtrack_limit', '500000');
@@ -840,6 +840,9 @@ function repair_package_info(string $type, ?string $slug, ?string $version, ?arr
         return [
             'label' => "plugin $slug $version",
             'url' => "https://downloads.wordpress.org/plugin/$slug.$version.zip",
+            'alternate_urls' => [
+                "https://downloads.wordpress.org/plugin/$slug.zip",
+            ],
             'cache_name' => "plugin-$slug-$version.zip",
             'zip_prefix' => "$slug/",
             'fallback_local_paths' => local_clean_zip_candidates('plugins', $slug, $version),
@@ -850,6 +853,9 @@ function repair_package_info(string $type, ?string $slug, ?string $version, ?arr
         return [
             'label' => "theme $slug $version",
             'url' => "https://downloads.wordpress.org/theme/$slug.$version.zip",
+            'alternate_urls' => [
+                "https://downloads.wordpress.org/theme/$slug.zip",
+            ],
             'cache_name' => "theme-$slug-$version.zip",
             'zip_prefix' => "$slug/",
             'fallback_local_paths' => local_clean_zip_candidates('themes', $slug, $version),
@@ -995,20 +1001,44 @@ function ensure_package_zip(array $package): ?string {
         return $zipPath;
     }
 
-    say("[REPAIR] Downloading clean package: {$package['url']}");
-    $body = http_get_body($package['url']);
-    if (!is_string($body) || strlen($body) < 1000) {
-        $fallback = find_existing_local_clean_zip($package['fallback_local_paths'] ?? []);
-        if ($fallback) {
-            say("[REPAIR] Download failed; using local clean ZIP: $fallback", true);
-            return $fallback;
+    $urls = array_values(array_unique(array_merge([$package['url']], $package['alternate_urls'] ?? [])));
+    foreach ($urls as $idx => $url) {
+        $candidatePath = $idx === 0
+            ? $zipPath
+            : rtrim($packageCacheDir, '/') . '/' . alternate_package_cache_name($package, $url);
+        $downloaded = download_package_zip($url, $candidatePath);
+        if ($downloaded) {
+            return $downloaded;
         }
+    }
+
+    $fallback = find_existing_local_clean_zip($package['fallback_local_paths'] ?? []);
+    if ($fallback) {
+        say("[REPAIR] Download failed; using local clean ZIP: $fallback", true);
+        return $fallback;
+    }
+    return null;
+}
+
+function download_package_zip(string $url, string $zipPath): ?string {
+    say("[REPAIR] Downloading clean package: $url");
+    $body = http_get_body($url);
+    if (!is_string($body) || strlen($body) < 1000) {
         return null;
     }
     if (@file_put_contents($zipPath, $body, LOCK_EX) === false) {
         return null;
     }
     return $zipPath;
+}
+
+function alternate_package_cache_name(array $package, string $url): string {
+    $base = basename(parse_url($url, PHP_URL_PATH) ?: $url);
+    $base = preg_replace('/[^A-Za-z0-9._-]+/', '-', $base);
+    if (!is_string($base) || $base === '' || strtolower($base) === '.zip') {
+        $base = 'alternate-' . ($package['cache_name'] ?? 'package.zip');
+    }
+    return 'alternate-' . $base;
 }
 
 function find_existing_local_clean_zip(array $paths): ?string {
