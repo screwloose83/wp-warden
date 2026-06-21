@@ -131,6 +131,7 @@ Repair currently supports clean ZIPs for:
 - WordPress core from `wordpress.org`
 - wordpress.org plugins from `downloads.wordpress.org`, trying versioned ZIPs first and unversioned ZIPs last
 - wordpress.org themes from `downloads.wordpress.org`, trying versioned ZIPs first and unversioned ZIPs last
+- WordPress.org plugin/theme SVN tag file fallback after ZIP sources fail
 - Paid/vendor plugins and themes when checksum intel includes a `clean_zip` entry
 
 The `wp-warden-intel` helper `admin/add-plugin-zip-checksums.php` can generate paid-plugin checksums and copy the clean vendor ZIP into `clean-zips/plugins/`.

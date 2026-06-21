@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.26';
+const WP_WARDEN_VERSION = '0.1.27';
 
 $opts = parse_args($argv);
 @ini_set('pcre.backtrack_limit', '500000');
@@ -846,6 +846,7 @@ function repair_package_info(string $type, ?string $slug, ?string $version, ?arr
             'cache_name' => "plugin-$slug-$version.zip",
             'zip_prefix' => "$slug/",
             'fallback_local_paths' => local_clean_zip_candidates('plugins', $slug, $version),
+            'svn_base_url' => "https://plugins.svn.wordpress.org/$slug/tags/$version/",
         ];
     }
 
@@ -859,6 +860,7 @@ function repair_package_info(string $type, ?string $slug, ?string $version, ?arr
             'cache_name' => "theme-$slug-$version.zip",
             'zip_prefix' => "$slug/",
             'fallback_local_paths' => local_clean_zip_candidates('themes', $slug, $version),
+            'svn_base_url' => "https://themes.svn.wordpress.org/$slug/$version/",
         ];
     }
 
@@ -904,19 +906,19 @@ function repair_from_package(array $package, string $relativePath, string $absPa
 
     if (!class_exists('ZipArchive')) {
         say("[REPAIR-FAIL] PHP ZipArchive extension is not available; cannot repair $relativePath", true);
-        return false;
+        return repair_from_svn_file($package, $relativePath, $absPath, $expected);
     }
 
     $zipPath = ensure_package_zip($package);
     if (!$zipPath) {
-        say("[REPAIR-FAIL] Could not download clean package: {$package['url']}", true);
+        say("[REPAIR] Could not get clean ZIP package: {$package['url']}", true);
         if (!empty($package['fallback_local_paths'])) {
-            say("[REPAIR-FAIL] Local clean ZIP paths checked:", true);
+            say("[REPAIR] Local clean ZIP paths checked:", true);
             foreach ($package['fallback_local_paths'] as $path) {
                 say("  - $path", true);
             }
         }
-        return false;
+        return repair_from_svn_file($package, $relativePath, $absPath, $expected);
     }
 
     $zipInnerPath = package_inner_path($package, $relativePath);
@@ -965,6 +967,63 @@ function repair_from_package(array $package, string $relativePath, string $absPa
     $state['actions'][] = $action;
     $state['summary']['actions_taken']++;
     say("[REPAIRED] $relativePath from {$package['label']}", true);
+    return true;
+}
+
+function repair_from_svn_file(array $package, string $relativePath, string $absPath, array $expected): bool {
+    global $state;
+
+    if (empty($package['svn_base_url'])) {
+        say("[REPAIR-FAIL] No SVN fallback source available for $relativePath", true);
+        return false;
+    }
+
+    $inner = package_inner_path($package, $relativePath);
+    $prefix = $package['zip_prefix'] ?? '';
+    if ($prefix !== '' && strpos($inner, $prefix) === 0) {
+        $inner = substr($inner, strlen($prefix));
+    }
+    $svnUrl = rtrim($package['svn_base_url'], '/') . '/' . rawurlencode_path($inner);
+    say("[REPAIR] Fetching clean file from SVN: $svnUrl", true);
+
+    $data = http_get_body($svnUrl);
+    if (!is_string($data) || $data === '') {
+        say("[REPAIR-FAIL] Could not fetch clean file from SVN: $svnUrl", true);
+        return false;
+    }
+
+    $candidate = [
+        'md5' => strtolower(hash('md5', $data)),
+        'sha256' => strtolower(hash('sha256', $data)),
+    ];
+    if (!hash_matches($candidate, $expected)) {
+        say("[REPAIR-FAIL] SVN file checksum did not match intel for $relativePath", true);
+        return false;
+    }
+
+    $backup = backup_before_repair($absPath, $relativePath);
+    if ($backup === null) {
+        say("[REPAIR-FAIL] Could not backup original file before SVN repair: $relativePath", true);
+        return false;
+    }
+
+    if (@file_put_contents($absPath, $data, LOCK_EX) === false) {
+        say("[REPAIR-FAIL] Could not write SVN repaired file: $absPath", true);
+        return false;
+    }
+
+    $action = [
+        'type' => 'repair_svn',
+        'path' => $absPath,
+        'relative_path' => $relativePath,
+        'backup' => $backup,
+        'package' => $svnUrl,
+        'package_source' => $package['svn_base_url'],
+        'at' => gmdate('c'),
+    ];
+    $state['actions'][] = $action;
+    $state['summary']['actions_taken']++;
+    say("[REPAIRED] $relativePath from SVN {$package['label']}", true);
     return true;
 }
 
@@ -1039,6 +1098,10 @@ function alternate_package_cache_name(array $package, string $url): string {
         $base = 'alternate-' . ($package['cache_name'] ?? 'package.zip');
     }
     return 'alternate-' . $base;
+}
+
+function rawurlencode_path(string $path): string {
+    return implode('/', array_map('rawurlencode', explode('/', ltrim($path, '/'))));
 }
 
 function find_existing_local_clean_zip(array $paths): ?string {
