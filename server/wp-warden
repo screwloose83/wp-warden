@@ -1,0 +1,71 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+const DEFAULT_CONFIG = '/etc/wp-warden/config.json';
+const DEFAULT_TOKEN = '/etc/wp-warden/wpscan.env';
+const DEFAULT_CACHE = '/var/lib/wp-warden/wpscan-cache';
+
+$command = $argv[1] ?? 'help';
+if ($command === 'setup') { setup(array_slice($argv, 2)); exit(0); }
+if ($command === 'config') { show_config(); exit(0); }
+help();
+
+function setup(array $args): void {
+    if (function_exists('posix_geteuid') && posix_geteuid() !== 0) {
+        fwrite(STDERR, "ERROR: setup must be run as root.\n"); exit(1);
+    }
+    $opts = parse_opts($args);
+    $configPath = (string)($opts['config'] ?? DEFAULT_CONFIG);
+    $existing = read_json($configPath);
+    echo "WP Warden setup\n\n";
+
+    $enabled = ask_bool('Enable WPScan vulnerability checks?', (bool)($existing['vulnerability']['enabled'] ?? true), $opts['noninteractive'] ?? false);
+    $token = (string)($opts['wpscan-token'] ?? '');
+    if ($token === '' && $enabled && empty($opts['noninteractive'])) {
+        $token = hidden_prompt('WPScan API token (leave blank to keep existing): ');
+    }
+    $tokenFile = (string)($opts['token-file'] ?? ($existing['vulnerability']['providers']['wpscan']['token_file'] ?? DEFAULT_TOKEN));
+    $cacheDir = (string)($opts['cache-dir'] ?? ($existing['vulnerability']['cache_dir'] ?? DEFAULT_CACHE));
+    $cacheDays = max(1, (int)($opts['cache-days'] ?? ($existing['vulnerability']['cache_days'] ?? 7)));
+    $allowStaleDays = max($cacheDays, (int)($opts['allow-stale-days'] ?? ($existing['vulnerability']['allow_stale_days'] ?? 30)));
+
+    $config = [
+        'version' => 1,
+        'vulnerability' => [
+            'enabled' => $enabled,
+            'provider' => 'wpscan',
+            'cache_dir' => $cacheDir,
+            'cache_days' => $cacheDays,
+            'refresh_after_days' => $cacheDays,
+            'allow_stale_days' => $allowStaleDays,
+            'providers' => ['wpscan' => ['token_file' => $tokenFile]],
+        ],
+    ];
+
+    secure_dir(dirname($configPath));
+    secure_dir(dirname($tokenFile));
+    secure_dir($cacheDir, 0755);
+    atomic_write($configPath, json_encode($config, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)."\n", 0600);
+    if ($token !== '') atomic_write($tokenFile, 'WPSCAN_API_TOKEN="'.addcslashes($token, "\\\"").'"'."\n", 0600);
+
+    echo "\nConfiguration written: $configPath\n";
+    echo "Token file:            $tokenFile\n";
+    echo "Cache directory:       $cacheDir\n";
+    echo "Cache lifetime:        $cacheDays days\n";
+    echo "Stale cache allowed:   $allowStaleDays days\n";
+    if ($enabled && !is_file($tokenFile)) echo "WARNING: vulnerability checks are enabled but no token file exists.\n";
+}
+
+function show_config(): void {
+    $config = read_json(DEFAULT_CONFIG);
+    if (!$config) { fwrite(STDERR, "No configuration found at ".DEFAULT_CONFIG."\n"); exit(1); }
+    echo json_encode($config, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)."\n";
+}
+function help(): void { echo "WP Warden server command\n\n  wp-warden setup [--wpscan-token=TOKEN] [--cache-days=7] [--allow-stale-days=30] [--noninteractive]\n  wp-warden config\n"; }
+function parse_opts(array $args): array { $o=[]; foreach($args as $a){if(strncmp($a,'--',2)!==0)continue;$p=explode('=',substr($a,2),2);$o[$p[0]]=$p[1]??true;}return $o; }
+function ask_bool(string $q,bool $default,bool $non): bool { if($non)return $default; $v=strtolower(trim((string)readline($q.' ['.($default?'Y/n':'y/N').'] '))); return $v===''?$default:in_array($v,['y','yes','1','true'],true); }
+function hidden_prompt(string $q): string { fwrite(STDOUT,$q); if(PHP_OS_FAMILY!=='Windows') shell_exec('stty -echo'); $v=trim((string)fgets(STDIN)); if(PHP_OS_FAMILY!=='Windows') { shell_exec('stty echo'); echo "\n"; } return $v; }
+function read_json(string $p): array { if(!is_file($p))return []; $d=json_decode(file_get_contents($p)?:'[]',true); return is_array($d)?$d:[]; }
+function secure_dir(string $d,int $mode=0700): void { if(!is_dir($d)&&!mkdir($d,$mode,true)&&!is_dir($d)){fwrite(STDERR,"ERROR: cannot create $d\n");exit(1);} chmod($d,$mode); }
+function atomic_write(string $p,string $c,int $mode): void { $tmp=$p.'.tmp.'.getmypid(); if(file_put_contents($tmp,$c,LOCK_EX)===false){fwrite(STDERR,"ERROR: cannot write $p\n");exit(1);} chmod($tmp,$mode); if(!rename($tmp,$p)){@unlink($tmp);fwrite(STDERR,"ERROR: cannot install $p\n");exit(1);} chmod($p,$mode); }
