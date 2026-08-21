@@ -40,6 +40,34 @@ For central management, put the approved logins in the intel policy:
 
 When `known_admins` is empty, the scanner reports the admin users it found but does not flag them.
 
+## WP Warden and Intel Updates
+
+The versioned multi-site wrapper checks GitHub for updates at most once every six hours. A failed network check never blocks a scan. It reports changes separately for the scanner and these deployed intelligence directories:
+
+- `wp-warden-intel/patterns`
+- `wp-warden-intel/clean-zips`
+- `wp-warden-intel/checksums`
+
+Run a check immediately without scanning a site:
+
+```bash
+/root/wp-warden/scanner/wp-warden-scan-sites-0.1.57.sh --check-updates
+```
+
+Install a clean fast-forward update and copy published intel files into the deployed intel bundle:
+
+```bash
+/root/wp-warden/scanner/wp-warden-scan-sites-0.1.57.sh --self-update
+```
+
+`--self-update` stops when the Git checkout contains local changes. Intel syncing overwrites published files that changed but preserves local-only files. Override the standard locations with `WP_WARDEN_REPO_ROOT` and `WP_WARDEN_INTEL_ROOT`. Set `WP_WARDEN_UPDATE_CHECK_INTERVAL` to change the default 21,600-second check interval.
+
+## High-confidence Malicious Plugin Families
+
+WP Warden treats version-suffixed `wp2shell-<hex>` and `galex_<hex>` plugin directories as critical malware indicators rather than unknown plugins needing checksum intel. The Galex command-shell content signature also detects renamed copies that accept request-controlled commands and return `[S]`/`[E]` output markers.
+
+With `--apply --quarantine=DIR --quarantine-malware-auto`, WP Warden quarantines the entire containing plugin directory for these high-confidence detections. Without those explicit options, it reports the finding without changing the site.
+
 ## Fetch Official Checksums
 
 On an admin/build machine or a server with outbound HTTPS, you can fetch and cache official checksum sources into the intel directory:
