@@ -51,22 +51,37 @@ The versioned multi-site wrapper checks GitHub for updates at most once every si
 Run a check immediately without scanning a site:
 
 ```bash
-/root/wp-warden/scanner/wp-warden-scan-sites-0.1.57.sh --check-updates
+/root/wp-warden/scanner/wp-warden-scan-sites-0.1.58.sh --check-updates
 ```
 
 Install a clean fast-forward update and copy published intel files into the deployed intel bundle:
 
 ```bash
-/root/wp-warden/scanner/wp-warden-scan-sites-0.1.57.sh --self-update
+/root/wp-warden/scanner/wp-warden-scan-sites-0.1.58.sh --self-update
 ```
 
-`--self-update` stops when the Git checkout contains local changes. Intel syncing overwrites published files that changed but preserves local-only files. Override the standard locations with `WP_WARDEN_REPO_ROOT` and `WP_WARDEN_INTEL_ROOT`. Set `WP_WARDEN_UPDATE_CHECK_INTERVAL` to change the default 21,600-second check interval.
+The check displays both the installed scanner version/local commit and the newest scanner version/GitHub `main` commit. `--self-update` stops when the Git checkout contains local changes. Intel syncing overwrites published files that changed but preserves local-only files. Override the standard locations with `WP_WARDEN_REPO_ROOT` and `WP_WARDEN_INTEL_ROOT`. Set `WP_WARDEN_UPDATE_CHECK_INTERVAL` to change the default 21,600-second check interval.
 
 ## High-confidence Malicious Plugin Families
 
 WP Warden treats version-suffixed `wp2shell-<hex>` and `galex_<hex>` plugin directories as critical malware indicators rather than unknown plugins needing checksum intel. The Galex command-shell content signature also detects renamed copies that accept request-controlled commands and return `[S]`/`[E]` output markers.
 
 With `--apply --quarantine=DIR --quarantine-malware-auto`, WP Warden quarantines the entire containing plugin directory for these high-confidence detections. Without those explicit options, it reports the finding without changing the site.
+
+## Database-to-/tmp wp-config Persistence
+
+WP Warden detects the confirmed `WP_Core_Integrity <hex>` persistence family that injects a PDO loader into `wp-config.php`, reads `_site_transient_health_<hex>` from the WordPress options table, Base64-decodes it, and writes a `/tmp/php...` payload.
+
+Report-only detection happens during every database-enabled scan. Explicit cleanup requires both apply and quarantine controls:
+
+```bash
+php wp-warden-pef-0.1.58.php /path/to/wordpress \
+  --apply \
+  --quarantine=/var/lib/wp-warden/quarantine/site \
+  --cleanup-database-persistence-auto
+```
+
+Cleanup backs up the infected `wp-config.php` and each database option into the quarantine directory, removes only the confirmed injected block and matching options, and moves the exact `/tmp/php...` payload when it exists. The normal multi-site cleanup pass enables this guarded action automatically because it already supplies `--apply` and a per-site quarantine directory.
 
 ## Fetch Official Checksums
 
