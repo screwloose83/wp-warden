@@ -298,7 +298,9 @@ scan_site(){
  QUARANTINE="$(quarantine_root "$DOMAIN")"; mkdir -p "$QUARANTINE"
  SITE_LOG="${RUN_LOG_DIR}/${DOMAIN}-${RUN_TIME}.log"; REPORT="${RUN_LOG_DIR}/${DOMAIN}-${RUN_TIME}.json"
  { line; echo " WP-Warden: $DOMAIN"; echo " Started: $(date)"; echo " Site: $SITE_ROOT"; echo " Quarantine: $QUARANTINE"; echo " JSON: $REPORT"; line; echo; echo ">>> PASS 1: VERIFY + SCAN + CLEANUP"; } | tee -a "$SITE_LOG"
- php "$WARDEN" "$SITE_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --quarantine-extra-auto --quarantine-extra-core-auto --exclude-pdf --max-size=1 --max-text-size=1 --quarantine="$QUARANTINE" 2>&1 | tee -a "$SITE_LOG"
+ # Extra plugin/theme files are report-only by default. Premium/vendor checksum
+ # sets can be incomplete, so their absence is not proof of malware.
+ php "$WARDEN" "$SITE_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --quarantine-extra-core-auto --exclude-pdf --max-size=1 --max-text-size=1 --quarantine="$QUARANTINE" 2>&1 | tee -a "$SITE_LOG"
  CLEANUP_EXIT=${PIPESTATUS[0]}
  { echo; echo ">>> PASS 1 EXIT CODE: $CLEANUP_EXIT"; echo ">>> PASS 2: POST-CLEANUP VERIFY (cache enabled, no checksum refetch)"; } | tee -a "$SITE_LOG"
  php "$WARDEN" "$SITE_ROOT" --verify-all --noninteractive --exclude-pdf --max-size=1 --max-text-size=1 --vulnerability-scan --report-json="$REPORT" 2>&1 | tee -a "$SITE_LOG"

@@ -140,6 +140,13 @@ php wp-warden.php /home/site/public_html \
   --quarantine=/var/lib/wp-warden/quarantine/site
 ```
 
+`extra_plugin_file` and `extra_theme_file` findings are report-only in the
+multi-site wrapper. Package/checksum sets for premium plugins can be incomplete,
+so use `--quarantine-extra-auto` only after confirming the checksum source is a
+complete trusted package. A PHP tag in documentation, test fixtures, JavaScript,
+HTML, or JSON is also reported for review; automatic malware quarantine requires
+a stronger built-in execution heuristic or an explicitly trusted rule.
+
 ## Interactive Checksum Repair
 
 When a core/plugin/theme file differs from checksum intel, WP Warden can offer to replace that file from a clean package ZIP.

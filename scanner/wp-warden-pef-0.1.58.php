@@ -229,7 +229,7 @@ if ($quarantineMalwareAuto !== false) {
     } elseif (!$quarantineDir) {
         say("WARN: --quarantine-malware-auto requires --quarantine=DIR; automatic malware quarantine is disabled", true);
     } else {
-        say("Mode:   auto-quarantine enabled for HIGH/CRITICAL malware findings (builtin_malware_heuristic + php_code_in_non_php_file + executable_in_uploads)", true);
+        say("Mode:   auto-quarantine enabled for HIGH/CRITICAL malware findings (strong builtin_malware_heuristic + executable_in_uploads; generic PHP-in-non-PHP findings are report-only)", true);
     if ($quarantineWpContentAuto) { say("Mode:   auto-quarantine enabled for suspicious unexpected wp-content directories", true); }
     }
 }
@@ -285,9 +285,9 @@ function print_help(): void {
     echo "  --interactive           Prompt for allowed actions\n";
     echo "  --apply                 Permit quarantine/actions\n";
     echo "  --quarantine=DIR        Quarantine directory for moved files\n";
-    echo "  --quarantine-extra-auto Auto-quarantine checksum-proven extra plugin/theme files; requires --apply and --quarantine\n";
+    echo "  --quarantine-extra-auto Auto-quarantine extra plugin/theme files absent from a complete trusted checksum set; requires --apply and --quarantine\n";
     echo "  --quarantine-extra-core-auto Auto-quarantine files in wp-admin/wp-includes absent from official core checksums; requires --apply and --quarantine\n";
-    echo "  --quarantine-malware-auto Auto-quarantine high/critical built-in malware findings, PHP hidden in non-PHP files, and executables/scripts in uploads; requires --apply and --quarantine=DIR\n";
+    echo "  --quarantine-malware-auto Auto-quarantine strong high/critical built-in malware findings and executables/scripts in uploads; generic PHP-in-non-PHP findings remain report-only; requires --apply and --quarantine=DIR\n";
     echo "                          Interactive actions: V preview, R repair, Q quarantine, D delete, A allowlist, S skip\n";
     echo "  --repair-original       Offer to replace mismatched core/plugin/theme files from clean ZIPs\n";
     echo "  --repair-original-auto  Auto-replace mismatched files from clean ZIPs; requires --apply\n";
@@ -4140,10 +4140,16 @@ function maybe_auto_quarantine_malware_finding(array $finding): bool {
         return !is_file($src);
     }
 
-    // Existing built-in, high-confidence automatic malware quarantine.
+    /*
+     * Existing built-in, high-confidence automatic malware quarantine.
+     *
+     * A PHP opening tag in a non-PHP file is useful review evidence, but is not
+     * sufficient for unattended removal. CodeMirror fixtures, vendor docs and
+     * README examples legitimately contain PHP snippets. Stronger built-in
+     * execution heuristics are emitted separately and remain eligible here.
+     */
     if (!in_array($type, [
         'builtin_malware_heuristic',
-        'php_code_in_non_php_file',
         'executable_in_uploads',
     ], true)) {
         return false;
