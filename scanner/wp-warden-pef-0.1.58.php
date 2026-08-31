@@ -1040,11 +1040,19 @@ function audit_database_persistence(mysqli $db, string $prefix): void {
 }
 
 function detect_malware_admin_user(array $entry): ?array {
-    $login = strtolower(trim((string)($entry['user_login'] ?? '')));
-    $email = strtolower(trim((string)($entry['user_email'] ?? '')));
+    $login = strtolower(trim((string)($entry['login'] ?? $entry['user_login'] ?? '')));
+    $email = strtolower(trim((string)($entry['email'] ?? $entry['user_email'] ?? '')));
 
     if ($login === '' && $email === '') {
         return null;
+    }
+
+    if ($login === 'warnight6413' && $email === 'warnight6413@proton.me') {
+        return [
+            'id' => 'BUILTIN_WARNIGHT_ADMIN_001',
+            'severity' => 'critical',
+            'reason' => 'Administrator login and email exactly match the confirmed warnight6413 compromise account IOC.',
+        ];
     }
 
     if ($login === 'wphiddenbot') {
@@ -3328,6 +3336,10 @@ function should_skip_path(string $rel, array $intel): bool {
     return false;
 }
 
+function is_cwp_login_compromise_filename(string $rel): bool {
+    return preg_match('/^cwp_login_[a-f0-9]{6,32}\.php$/i', basename($rel)) === 1;
+}
+
 function scan_one_file(string $root, string $path, string $rel, array $intel, array $coreChecksums, array $componentChecksums, bool $verifyAll): void {
     global $maxTextSizeMb;
 
@@ -3341,6 +3353,19 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
     }
 
     $rel = normalize_relative($rel);
+    if (is_cwp_login_compromise_filename($rel)) {
+        add_finding([
+            'severity' => 'high',
+            'type' => 'suspicious_filename_ioc',
+            'rule_id' => 'BUILTIN_CWP_LOGIN_DROPPER_FILENAME_001',
+            'path' => $path,
+            'relative_path' => $rel,
+            'reason' => 'Filename matches the cwp_login_<random>.php IOC reported in the August 2026 CWP compromise campaign.',
+            'hashes' => $hashes,
+            'recommended_action' => 'Inspect and quarantine the file, then investigate the CWP host for related persistence and credential compromise.',
+        ], true);
+    }
+
     if (isset($coreChecksums[$rel])) {
         $expected = $coreChecksums[$rel];
         if (hash_matches($hashes, $expected)) {

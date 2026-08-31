@@ -6,6 +6,7 @@ REPO_ROOT="${WP_WARDEN_REPO_ROOT:-/root/wp-warden}"
 INTEL_ROOT="${WP_WARDEN_INTEL_ROOT:-${REPO_ROOT}/wp-warden-intel}"
 WARDEN=""
 VIRTUAL_ROOT="${WP_WARDEN_VIRTUAL_ROOT:-/home/virtual}"
+CWP_HOME_ROOT="${WP_WARDEN_CWP_HOME_ROOT:-/home}"
 LOG_ROOT="${WP_WARDEN_LOG_ROOT:-/root/wp-warden/logs}"
 LOG_RETENTION_DAYS=30
 UPDATE_CHECK_INTERVAL="${WP_WARDEN_UPDATE_CHECK_INTERVAL:-21600}"
@@ -19,8 +20,54 @@ line(){ echo "==================================================================
 find_warden(){ find "${REPO_ROOT}/scanner" -maxdepth 1 -type f -name 'wp-warden-pef-*.php' -printf '%f\n' 2>/dev/null | sort -V | tail -n 1 | sed "s#^#${REPO_ROOT}/scanner/#"; }
 scanner_version_from_path(){ basename "$1" | sed -nE 's/^wp-warden-(pef|scan-sites)-([0-9]+\.[0-9]+\.[0-9]+)\.(php|sh)$/\2/p'; }
 github_scanner_file(){ git -C "$REPO_ROOT" ls-tree -r --name-only origin/main -- scanner 2>/dev/null | grep -E '^scanner/wp-warden-pef-[0-9]+\.[0-9]+\.[0-9]+\.php$' | sort -V | tail -n 1; }
-site_root(){ local d="$1" b="${VIRTUAL_ROOT}/${1}"; [ -f "$b/var/www/html/wp-config.php" ] && echo "$b/var/www/html"; }
-quarantine_root(){ echo "${VIRTUAL_ROOT}/${1}/var/www/q"; }
+site_root(){
+    local PLATFORM="$1" SITE_ID="$2" ROOT="${3:-}"
+    case "$PLATFORM" in
+        apiscp)
+            [ -n "$ROOT" ] && [ -f "$ROOT/wp-config.php" ] && { echo "$ROOT"; return 0; }
+            [ -f "${VIRTUAL_ROOT}/${SITE_ID}/var/www/html/wp-config.php" ] && echo "${VIRTUAL_ROOT}/${SITE_ID}/var/www/html"
+            ;;
+        cwp)
+            [ -n "$ROOT" ] && [ -f "$ROOT/wp-config.php" ] && { echo "$ROOT"; return 0; }
+            [ -f "${CWP_HOME_ROOT}/${SITE_ID}/public_html/wp-config.php" ] && echo "${CWP_HOME_ROOT}/${SITE_ID}/public_html"
+            ;;
+    esac
+}
+
+quarantine_root(){
+    local PLATFORM="$1" SITE_ID="$2" SITE_ROOT="${3:-}"
+    case "$PLATFORM" in
+        apiscp) echo "${VIRTUAL_ROOT}/${SITE_ID}/var/www/q" ;;
+        cwp)
+            if [ -n "$SITE_ROOT" ]; then
+                echo "$(dirname "$SITE_ROOT")/q"
+            else
+                echo "${CWP_HOME_ROOT}/${SITE_ID}/q"
+            fi
+            ;;
+    esac
+}
+
+site_domain(){
+    local PLATFORM="$1" SITE_ID="$2" SITE_ROOT="$3" URL
+    if [ "$PLATFORM" = "apiscp" ]; then
+        echo "$SITE_ID"
+        return 0
+    fi
+
+    if command -v wp >/dev/null 2>&1; then
+        URL=$(wp option get siteurl --path="$SITE_ROOT" --allow-root --skip-plugins --skip-themes 2>/dev/null || true)
+        if [ -n "$URL" ]; then
+            printf '%s\n' "$URL" | sed -E 's#^https?://##; s#/.*$##'
+            return 0
+        fi
+    fi
+
+    # Fallback: read WP_HOME/WP_SITEURL if defined directly in wp-config.php.
+    URL=$(grep -E "define\([[:space:]]*['\"]WP_(HOME|SITEURL)['\"]" "$SITE_ROOT/wp-config.php" 2>/dev/null | \
+          sed -nE "s#.*['\"]https?://([^/'\"]+).*#\1#p" | head -n 1)
+    [ -n "$URL" ] && echo "$URL"
+}
 cleanup_old_logs(){ [ -d "$LOG_ROOT" ] && find "$LOG_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime +"$LOG_RETENTION_DAYS" -exec rm -rf {} \; 2>/dev/null; }
 
 tree_needs_update(){
@@ -255,7 +302,7 @@ fleet_ioc_sweep(){
         any(. == "PHP_WPHIDDENBOT_PERSISTENCE_001"
             or . == "PHP_WPHIDDENBOT_HIDE_USER_003"
             or . == "BUILTIN_WPHIDDENBOT_ADMIN_001"
-            or test("WP2SHELL|GALEX|NX_ADMIN"))
+            or test("WP2SHELL|GALEX|NX_ADMIN|WARNIGHT"))
     ' "$REPORT" >/dev/null 2>&1; then
         NEED_SWEEP=1
     fi
@@ -271,12 +318,13 @@ fleet_ioc_sweep(){
     local MATCH_FILE="${RUN_LOG_DIR}/${DOMAIN}-${RUN_TIME}-fleet-ioc.txt"
     : > "$MATCH_FILE"
 
-    for ROOT in "$VIRTUAL_ROOT"/*/var/www/html/wp-content; do
+    while IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DISCOVERED_DOMAIN; do
+        ROOT="${SITE_ROOT}/wp-content"
         [ -d "$ROOT" ] || continue
         grep -RIlE \
-            'wphiddenbot|wp2shell[-_.]|galex_[a-f0-9]{6,64}|@nx\.invalid|_wp_cache_optimizer_flag|WP_Cache_Optimizer_Core' \
+            'wphiddenbot|wp2shell[-_.]|galex_[a-f0-9]{6,64}|@nx\.invalid|warnight6413|_wp_cache_optimizer_flag|WP_Cache_Optimizer_Core' \
             "$ROOT" 2>/dev/null >> "$MATCH_FILE" || true
-    done
+    done < <(discover_sites)
 
     sort -u -o "$MATCH_FILE" "$MATCH_FILE"
     local COUNT
@@ -291,13 +339,38 @@ fleet_ioc_sweep(){
 }
 
 scan_site(){
- local DOMAIN="$1" SITE_ROOT QUARANTINE SITE_LOG REPORT CLEANUP_EXIT VERIFY_EXIT
- local CRITICAL=0 HIGH=0 MEDIUM=0 LOW=0 TOTAL=0 VULN_COUNT=0 VULN_STATUS=UNKNOWN RESULT_STATUS SITE_START SITE_END
- SITE_START=$(date +%s); SITE_ROOT="$(site_root "$DOMAIN")"
- if [ -z "${SITE_ROOT:-}" ]; then echo "[SKIP] $DOMAIN - WordPress root not found"; write_summary "$DOMAIN" SKIPPED 0 0 0 0 0 0 NOT_RUN 0 NOT_CHECKED n/a; return 2; fi
- QUARANTINE="$(quarantine_root "$DOMAIN")"; mkdir -p "$QUARANTINE"
- SITE_LOG="${RUN_LOG_DIR}/${DOMAIN}-${RUN_TIME}.log"; REPORT="${RUN_LOG_DIR}/${DOMAIN}-${RUN_TIME}.json"
- { line; echo " WP-Warden: $DOMAIN"; echo " Started: $(date)"; echo " Site: $SITE_ROOT"; echo " Quarantine: $QUARANTINE"; echo " JSON: $REPORT"; line; echo; echo ">>> PASS 1: VERIFY + SCAN + CLEANUP"; } | tee -a "$SITE_LOG"
+ local PLATFORM="$1" SITE_ID="$2" SITE_ROOT="${3:-}" DOMAIN="${4:-}" QUARANTINE SITE_LOG REPORT CLEANUP_EXIT VERIFY_EXIT
+ local CRITICAL=0 HIGH=0 MEDIUM=0 LOW=0 TOTAL=0 VULN_COUNT=0 VULN_STATUS=UNKNOWN RESULT_STATUS SITE_START SITE_END DISPLAY_ID
+ SITE_START=$(date +%s)
+ SITE_ROOT="$(site_root "$PLATFORM" "$SITE_ID" "$SITE_ROOT")"
+ if [ -z "${SITE_ROOT:-}" ]; then
+   echo "[SKIP] $SITE_ID - WordPress root not found"
+   write_summary "$SITE_ID" SKIPPED 0 0 0 0 0 0 NOT_RUN 0 NOT_CHECKED n/a
+   return 2
+ fi
+
+ [ -n "$DOMAIN" ] || DOMAIN="$(site_domain "$PLATFORM" "$SITE_ID" "$SITE_ROOT")"
+ DISPLAY_ID="${DOMAIN:-$SITE_ID}"
+
+ QUARANTINE="$(quarantine_root "$PLATFORM" "$SITE_ID" "$SITE_ROOT")"
+ if [ -z "${QUARANTINE:-}" ]; then
+   echo "[SKIP] $DISPLAY_ID - quarantine path could not be determined"
+   write_summary "$DISPLAY_ID" SKIPPED 0 0 0 0 0 0 NOT_RUN 0 NOT_CHECKED n/a
+   return 2
+ fi
+ mkdir -p "$QUARANTINE"
+
+ if [ "$PLATFORM" = "cwp" ]; then
+   local CWP_USER
+   CWP_USER="$(basename "$(dirname "$SITE_ROOT")")"
+   if id "$CWP_USER" >/dev/null 2>&1; then
+     chown "$CWP_USER:$CWP_USER" "$QUARANTINE" 2>/dev/null || true
+     chmod 700 "$QUARANTINE" 2>/dev/null || true
+   fi
+ fi
+
+ SITE_LOG="${RUN_LOG_DIR}/${DISPLAY_ID}-${RUN_TIME}.log"; REPORT="${RUN_LOG_DIR}/${DISPLAY_ID}-${RUN_TIME}.json"
+ { line; echo " WP-Warden: $DISPLAY_ID"; echo " Started: $(date)"; echo " Platform: $PLATFORM"; echo " Site ID: $SITE_ID"; echo " Domain: ${DOMAIN:-unknown}"; echo " Site: $SITE_ROOT"; echo " Quarantine: $QUARANTINE"; echo " JSON: $REPORT"; line; echo; echo ">>> PASS 1: VERIFY + SCAN + CLEANUP"; } | tee -a "$SITE_LOG"
  # Extra plugin/theme files are report-only by default. Premium/vendor checksum
  # sets can be incomplete, so their absence is not proof of malware.
  php "$WARDEN" "$SITE_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --quarantine-extra-core-auto --exclude-pdf --max-size=1 --max-text-size=1 --quarantine="$QUARANTINE" 2>&1 | tee -a "$SITE_LOG"
@@ -318,19 +391,46 @@ scan_site(){
  LAST_HEALTH_STATUS="UNKNOWN"
  LAST_HEALTH_HTTP="0"
  LAST_HEALTH_REASON="not_checked"
- check_site_health "$DOMAIN" "$SITE_LOG"
+ LAST_HEALTH_DETAIL="n/a"
+ if [ -n "$DOMAIN" ]; then
+   check_site_health "$DOMAIN" "$SITE_LOG"
+ else
+   echo " Site health: skipped - domain could not be determined" | tee -a "$SITE_LOG"
+   LAST_HEALTH_STATUS="NOT_CHECKED"
+   LAST_HEALTH_REASON="domain_unknown"
+ fi
 
  if [ "${RUNNING_ALL:-0}" -ne 1 ]; then
-   fleet_ioc_sweep "$DOMAIN" "$REPORT" "$SITE_LOG"
+   fleet_ioc_sweep "$DISPLAY_ID" "$REPORT" "$SITE_LOG"
  fi
 
  SITE_END=$(date +%s)
- { echo; line; echo " RESULT: ${RESULT_STATUS/_/ }"; echo " Domain: $DOMAIN"; echo " Critical: $CRITICAL"; echo " High: $HIGH"; echo " Medium: $MEDIUM"; echo " Low: $LOW"; echo " Findings: $TOTAL"; echo " Vulnerabilities: $VULN_COUNT ($VULN_STATUS)"; echo " Site health: $LAST_HEALTH_STATUS (HTTP $LAST_HEALTH_HTTP, $LAST_HEALTH_REASON)"; printf " Runtime: %dm %02ds\n" "$(((SITE_END-SITE_START)/60))" "$(((SITE_END-SITE_START)%60))"; echo " JSON: $REPORT"; line; } | tee -a "$SITE_LOG"
- write_summary "$DOMAIN" "$RESULT_STATUS" "$CRITICAL" "$HIGH" "$MEDIUM" "$LOW" "$TOTAL" "$VULN_COUNT" "$VULN_STATUS" "$LAST_HEALTH_HTTP" "$LAST_HEALTH_STATUS" "$LAST_HEALTH_DETAIL"
+ { echo; line; echo " RESULT: ${RESULT_STATUS/_/ }"; echo " Platform: $PLATFORM"; echo " Site ID: $SITE_ID"; echo " Domain: ${DOMAIN:-unknown}"; echo " Critical: $CRITICAL"; echo " High: $HIGH"; echo " Medium: $MEDIUM"; echo " Low: $LOW"; echo " Findings: $TOTAL"; echo " Vulnerabilities: $VULN_COUNT ($VULN_STATUS)"; echo " Site health: $LAST_HEALTH_STATUS (HTTP $LAST_HEALTH_HTTP, $LAST_HEALTH_REASON)"; printf " Runtime: %dm %02ds\n" "$(((SITE_END-SITE_START)/60))" "$(((SITE_END-SITE_START)%60))"; echo " JSON: $REPORT"; line; } | tee -a "$SITE_LOG"
+ write_summary "$DISPLAY_ID" "$RESULT_STATUS" "$CRITICAL" "$HIGH" "$MEDIUM" "$LOW" "$TOTAL" "$VULN_COUNT" "$VULN_STATUS" "$LAST_HEALTH_HTTP" "$LAST_HEALTH_STATUS" "$LAST_HEALTH_DETAIL"
  [ "$RESULT_STATUS" = CLEAN ] && return 0 || return 1
 }
 
-discover_sites(){ find "$VIRTUAL_ROOT" -maxdepth 1 -type l -printf '%f\n' 2>/dev/null | while read -r d; do [ -z "$d" ] && continue; case "$d" in site*|admin*|FILESYSTEMTEMPLATE) continue;; esac; [ -f "$VIRTUAL_ROOT/$d/var/www/html/wp-config.php" ] && echo "$d"; done | sort -u; }
+discover_sites(){
+    local d ROOT USER DOMAIN
+
+    # ApisCP: /home/virtual/domain.tld/var/www/html
+    if [ -d "$VIRTUAL_ROOT" ]; then
+        find "$VIRTUAL_ROOT" -maxdepth 1 \( -type l -o -type d \) -printf '%f\n' 2>/dev/null | while read -r d; do
+            [ -z "$d" ] && continue
+            case "$d" in site*|admin*|FILESYSTEMTEMPLATE) continue;; esac
+            ROOT="${VIRTUAL_ROOT}/${d}/var/www/html"
+            [ -f "$ROOT/wp-config.php" ] && printf 'apiscp|%s|%s|%s\n' "$d" "$ROOT" "$d"
+        done
+    fi
+
+    # CWP: /home/username/public_html
+    for ROOT in "$CWP_HOME_ROOT"/*/public_html; do
+        [ -f "$ROOT/wp-config.php" ] || continue
+        USER="$(basename "$(dirname "$ROOT")")"
+        DOMAIN="$(site_domain cwp "$USER" "$ROOT")"
+        printf 'cwp|%s|%s|%s\n' "$USER" "$ROOT" "$DOMAIN"
+    done
+} | sort -u
 
 aggregate_health(){
  local -a reports=("${RUN_LOG_DIR}"/*-"${RUN_TIME}".json)
@@ -385,24 +485,27 @@ scan_all(){
  RUNNING_ALL=1
  local START_TIME=$(date +%s) CLEAN_COUNT=0 DIRTY_COUNT=0 SKIPPED_COUNT=0 TOTAL_COUNT=0 SITE_RESULT
  local HEALTHY_COUNT=0 HEALTH_WARNING_COUNT=0 HEALTH_FAILED_COUNT=0
+ local PLATFORM SITE_ID SITE_ROOT DOMAIN DISPLAY_ID ENTRY
  local -a CLEAN_SITES=() DIRTY_SITES=() SKIPPED_SITES=() HEALTH_FAILED_SITES=() HEALTH_WARNING_SITES=() SITES=()
  local ALL_LOG="${RUN_LOG_DIR}/all-sites-${RUN_TIME}.log"; exec > >(tee -a "$ALL_LOG") 2>&1
- line; echo " WP-WARDEN - ALL WORDPRESS SITES"; echo " Started: $(date)"; echo " Scanner: $WARDEN"; echo " Log: $ALL_LOG"; line
+ line; echo " WP-WARDEN - ALL WORDPRESS SITES"; echo " Started: $(date)"; echo " Scanner: $WARDEN"; echo " Discovery: ApisCP + CWP"; echo " Log: $ALL_LOG"; line
  mapfile -t SITES < <(discover_sites); [ "${#SITES[@]}" -gt 0 ] || { echo "No WordPress installations found."; return 1; }
  echo "Found ${#SITES[@]} WordPress site(s)."
- for DOMAIN in "${SITES[@]}"; do
-   TOTAL_COUNT=$((TOTAL_COUNT+1)); echo; line; echo "[$TOTAL_COUNT/${#SITES[@]}] SCANNING: $DOMAIN"; line
+ for ENTRY in "${SITES[@]}"; do
+   IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DOMAIN <<< "$ENTRY"
+   DISPLAY_ID="${DOMAIN:-$SITE_ID}"
+   TOTAL_COUNT=$((TOTAL_COUNT+1)); echo; line; echo "[$TOTAL_COUNT/${#SITES[@]}] SCANNING: $DISPLAY_ID"; echo " Platform: $PLATFORM"; echo " Root: $SITE_ROOT"; line
    LAST_HEALTH_STATUS="UNKNOWN"; LAST_HEALTH_HTTP="0"; LAST_HEALTH_REASON="not_checked"
-   scan_site "$DOMAIN"; SITE_RESULT=$?
+   scan_site "$PLATFORM" "$SITE_ID" "$SITE_ROOT" "$DOMAIN"; SITE_RESULT=$?
    case "$SITE_RESULT" in
-     0) CLEAN_COUNT=$((CLEAN_COUNT+1)); CLEAN_SITES+=("$DOMAIN");;
-     1) DIRTY_COUNT=$((DIRTY_COUNT+1)); DIRTY_SITES+=("$DOMAIN");;
-     *) SKIPPED_COUNT=$((SKIPPED_COUNT+1)); SKIPPED_SITES+=("$DOMAIN");;
+     0) CLEAN_COUNT=$((CLEAN_COUNT+1)); CLEAN_SITES+=("$DISPLAY_ID");;
+     1) DIRTY_COUNT=$((DIRTY_COUNT+1)); DIRTY_SITES+=("$DISPLAY_ID");;
+     *) SKIPPED_COUNT=$((SKIPPED_COUNT+1)); SKIPPED_SITES+=("$DISPLAY_ID");;
    esac
    case "$LAST_HEALTH_STATUS" in
      HEALTHY) HEALTHY_COUNT=$((HEALTHY_COUNT+1));;
-     WARNING) HEALTH_WARNING_COUNT=$((HEALTH_WARNING_COUNT+1)); HEALTH_WARNING_SITES+=("$DOMAIN");;
-     FAILED) HEALTH_FAILED_COUNT=$((HEALTH_FAILED_COUNT+1)); HEALTH_FAILED_SITES+=("$DOMAIN");;
+     WARNING) HEALTH_WARNING_COUNT=$((HEALTH_WARNING_COUNT+1)); HEALTH_WARNING_SITES+=("$DISPLAY_ID");;
+     FAILED) HEALTH_FAILED_COUNT=$((HEALTH_FAILED_COUNT+1)); HEALTH_FAILED_SITES+=("$DISPLAY_ID");;
    esac
  done
  aggregate_health
@@ -427,4 +530,16 @@ WARDEN=$(find_warden)
 [ $# -eq 1 ] || usage
 if [ "$1" = --all ]; then scan_all; exit $?; fi
 DOMAIN="${1,,}"; [[ "$DOMAIN" =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]] || { echo "ERROR: Invalid domain: $DOMAIN"; exit 1; }
-scan_site "$DOMAIN"; exit $?
+
+MATCH=""
+while IFS= read -r ENTRY; do
+    IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DISCOVERED_DOMAIN <<< "$ENTRY"
+    if [ "$DOMAIN" = "${DISCOVERED_DOMAIN,,}" ] || [ "$DOMAIN" = "${SITE_ID,,}" ]; then
+        MATCH="$ENTRY"
+        break
+    fi
+done < <(discover_sites)
+
+[ -n "$MATCH" ] || { echo "ERROR: WordPress site not found for: $DOMAIN"; exit 1; }
+IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DISCOVERED_DOMAIN <<< "$MATCH"
+scan_site "$PLATFORM" "$SITE_ID" "$SITE_ROOT" "$DISCOVERED_DOMAIN"; exit $?
