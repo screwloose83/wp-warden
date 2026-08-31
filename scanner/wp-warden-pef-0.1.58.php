@@ -2808,6 +2808,14 @@ function audit_system_cron_persistence(string $root): void {
         return;
     }
 
+    // A CWP account can host its primary site in public_html plus add-on domains
+    // in sibling directories. Audit confirmed PHP-recreation jobs across that
+    // account's home tree; retain site-root scope for ApisCP/custom layouts.
+    $cronScopeRoot = $root;
+    if (preg_match('#^/home/' . preg_quote($account, '#') . '/#', normalize_path($root) . '/') === 1) {
+        $cronScopeRoot = '/home/' . $account;
+    }
+
     $lines = [];
     $exitCode = 0;
     @exec('crontab -u ' . escapeshellarg($account) . ' -l 2>/dev/null', $lines, $exitCode);
@@ -2817,7 +2825,7 @@ function audit_system_cron_persistence(string $root): void {
 
     $maliciousIndexes = [];
     foreach ($lines as $index => $line) {
-        $ioc = malicious_php_recreation_cron($line, $root);
+        $ioc = malicious_php_recreation_cron($line, $cronScopeRoot);
         if ($ioc === null) {
             continue;
         }

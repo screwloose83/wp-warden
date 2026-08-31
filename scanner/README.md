@@ -85,7 +85,7 @@ Cleanup backs up the infected `wp-config.php` and each database option into the 
 
 ## System Cron PHP-Recreation Persistence
 
-WP Warden audits the WordPress filesystem owner's crontab for confirmed jobs that recreate a missing PHP file from a long embedded Base64 payload. Detection is scoped to PHP targets inside the WordPress root currently being scanned, so unrelated cron jobs and sibling sites are not changed.
+WP Warden audits the WordPress filesystem owner's crontab for confirmed jobs that recreate a missing PHP file from a long embedded Base64 payload. On CWP, detection covers PHP targets under the current account's `/home/account` tree so primary and add-on domains are cleaned together. ApisCP and custom layouts remain scoped to the WordPress root. Unrelated cron jobs and other hosting accounts are not changed.
 
 Report-only cron auditing runs automatically. To back up the complete original crontab and remove only the matching persistence entries:
 
