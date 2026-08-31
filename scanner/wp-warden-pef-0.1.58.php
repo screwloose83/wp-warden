@@ -58,6 +58,7 @@ $knownAdminsOverride = isset($opts['known-admins']) && is_string($opts['known-ad
     : null;
 $cleanupMalwareUsersAuto = isset($opts['cleanup-malware-users-auto']);
 $cleanupDatabasePersistenceAuto = isset($opts['cleanup-database-persistence-auto']);
+$cleanupMalwareCronAuto = isset($opts['cleanup-malware-cron-auto']);
 $promptUnknownAdmins = isset($opts['prompt-unknown-admins']);
 $excludePdf = isset($opts['exclude-pdf']);
 $vulnerabilityScan = isset($opts['vulnerability-scan']);
@@ -131,6 +132,7 @@ $state = [
         'persistence_findings' => [],
         'option_iocs' => [],
         'cron_iocs' => [],
+        'system_cron_iocs' => [],
         'usermeta_iocs' => [],
         'config_iocs' => [],
         'error' => null,
@@ -244,6 +246,13 @@ if ($cleanupDatabasePersistenceAuto) {
         say("Mode:   confirmed wp-config/database/tmp persistence cleanup enabled", true);
     }
 }
+if ($cleanupMalwareCronAuto) {
+    if (!$apply || !$quarantineDir) {
+        say("WARN: --cleanup-malware-cron-auto requires --apply and --quarantine=DIR; system cron cleanup is disabled", true);
+    } else {
+        say("Mode:   confirmed malicious system cron cleanup enabled", true);
+    }
+}
 if ($wpVersion) {
     say("WordPress: $wpVersion ($locale)", true);
 }
@@ -254,6 +263,8 @@ say("Auditing known malicious plugin directory names...", true);
 audit_malicious_plugin_directories($wpRoot);
 say("Auditing wp-config.php persistence...", true);
 audit_wp_config_persistence($wpRoot);
+say("Auditing system cron persistence...", true);
+audit_system_cron_persistence($wpRoot);
 say("Scanning files...", true);
 $scanStartedMicro = microtime(true);
 scan_tree($wpRoot, $intel, $coreChecksums, $componentChecksums);
@@ -300,6 +311,7 @@ function print_help(): void {
     echo "  --known-admins=a,b      Comma-separated expected admin logins for DB audit\n";
     echo "  --cleanup-malware-users-auto Auto-remove only admins matching strong built-in malware-user IOCs; requires --apply\n";
     echo "  --cleanup-database-persistence-auto Remove confirmed wp-config/database/tmp persistence IOCs; requires --apply and --quarantine=DIR\n";
+    echo "  --cleanup-malware-cron-auto Remove confirmed Base64 PHP-recreation jobs from the site owner's crontab; backs up the crontab and requires --apply and --quarantine=DIR\n";
     echo "  --prompt-unknown-admins Prompt to remove unapproved/unverified admin users; requires --apply to delete\n";
     echo "  --no-db-audit           Skip WordPress administrator DB audit\n";
     echo "  --verify-all            Report files not matched by core checksum/baseline\n";
@@ -2719,6 +2731,146 @@ function save_file_cache(): void {
     }
 
     $fileCacheDirty = false;
+}
+
+function wp_root_owner_account(string $root): ?string {
+    // CWP has a stable /home/account/... layout. Prefer it because an infected
+    // or manually restored wp-config.php can temporarily have the wrong owner.
+    if (preg_match('#^/home/([^/]+)/#', normalize_path($root) . '/', $match) === 1
+        && preg_match('/^[A-Za-z0-9._-]+$/', $match[1]) === 1
+        && $match[1] !== 'virtual') {
+        return $match[1];
+    }
+
+    // ApisCP and custom layouts are resolved from filesystem ownership.
+    $ownerId = @fileowner($root . '/wp-config.php');
+    if ($ownerId === false) {
+        $ownerId = @fileowner($root);
+    }
+    if ($ownerId !== false && function_exists('posix_getpwuid')) {
+        $record = @posix_getpwuid((int)$ownerId);
+        $name = is_array($record) ? (string)($record['name'] ?? '') : '';
+        if (preg_match('/^[A-Za-z0-9._-]+$/', $name) === 1) {
+            return $name;
+        }
+    }
+
+    return null;
+}
+
+function malicious_php_recreation_cron(string $line, string $root): ?array {
+    $pattern = '#\[\s+-f\s+[' . "'\"" . ']?([^\]\s' . "'\"" . ']+\.php)[' . "'\"" . ']?\s*\]\s*\|\|\s*echo\s+[' . "'\"" . ']?([A-Za-z0-9+/=]{80,})[' . "'\"" . ']?\s*\|\s*(?:/[A-Za-z0-9._/-]+/)?base64\s+(?:-d|--decode)\s*>\s*[' . "'\"" . ']?([^\s;&|' . "'\"" . ']+\.php)#i';
+    if (preg_match($pattern, $line, $match) !== 1) {
+        return null;
+    }
+
+    $checkedPath = normalize_path($match[1]);
+    $outputPath = normalize_path($match[3]);
+    $rootPrefix = rtrim(normalize_path($root), '/') . '/';
+    if ($checkedPath !== $outputPath || strpos($outputPath, $rootPrefix) !== 0) {
+        return null;
+    }
+
+    return [
+        'path' => $outputPath,
+        'payload_sha256' => hash('sha256', $match[2]),
+    ];
+}
+
+function audit_system_cron_persistence(string $root): void {
+    global $state, $apply, $quarantineDir, $cleanupMalwareCronAuto;
+
+    $account = wp_root_owner_account($root);
+    if ($account === null || !command_exists('crontab')) {
+        return;
+    }
+
+    $lines = [];
+    $exitCode = 0;
+    @exec('crontab -u ' . escapeshellarg($account) . ' -l 2>/dev/null', $lines, $exitCode);
+    if ($exitCode !== 0 || $lines === []) {
+        return;
+    }
+
+    $maliciousIndexes = [];
+    foreach ($lines as $index => $line) {
+        $ioc = malicious_php_recreation_cron($line, $root);
+        if ($ioc === null) {
+            continue;
+        }
+
+        $record = [
+            'account' => $account,
+            'line_number' => $index + 1,
+            'command' => $line,
+            'target_path' => $ioc['path'],
+            'payload_sha256' => $ioc['payload_sha256'],
+        ];
+        $state['db_audit']['system_cron_iocs'][] = $record;
+        $maliciousIndexes[$index] = true;
+        add_finding([
+            'type' => 'system_cron_persistence',
+            'severity' => 'critical',
+            'confidence' => 'high',
+            'rule_id' => 'SYSTEM_CRON_BASE64_PHP_RECREATE_001',
+            'path' => $ioc['path'],
+            'relative_path' => "system-cron:{$account}:line-" . ($index + 1),
+            'reason' => 'System cron recreates a PHP file from an embedded Base64 payload whenever the file is missing.',
+            'cron' => $record,
+            'file_action' => false,
+            'recommended_action' => 'Remove this exact cron entry and quarantine the recreated PHP file.',
+        ]);
+    }
+
+    if ($maliciousIndexes === [] || !$cleanupMalwareCronAuto || !$apply || !$quarantineDir) {
+        return;
+    }
+
+    $backupDir = rtrim(normalize_path($quarantineDir), '/') . '/cron-persistence-' . gmdate('Ymd-His');
+    if (!is_dir($backupDir) && !@mkdir($backupDir, 0700, true) && !is_dir($backupDir)) {
+        say("WARN: could not create cron backup directory: $backupDir; crontab was not changed", true);
+        return;
+    }
+    $backupPath = $backupDir . '/' . $account . '.crontab';
+    $original = implode(PHP_EOL, $lines) . PHP_EOL;
+    if (@file_put_contents($backupPath, $original) === false) {
+        say("WARN: could not back up the {$account} crontab; crontab was not changed", true);
+        return;
+    }
+    @chmod($backupPath, 0600);
+
+    $kept = [];
+    foreach ($lines as $index => $line) {
+        if (!isset($maliciousIndexes[$index])) {
+            $kept[] = $line;
+        }
+    }
+    $tempPath = @tempnam(sys_get_temp_dir(), 'wpw-cron-');
+    if (!is_string($tempPath) || @file_put_contents($tempPath, $kept === [] ? '' : implode(PHP_EOL, $kept) . PHP_EOL) === false) {
+        say("WARN: could not prepare cleaned crontab; crontab was not changed", true);
+        return;
+    }
+    @chmod($tempPath, 0600);
+    $installOutput = [];
+    $installCode = 0;
+    @exec('crontab -u ' . escapeshellarg($account) . ' ' . escapeshellarg($tempPath) . ' 2>&1', $installOutput, $installCode);
+    @unlink($tempPath);
+    if ($installCode !== 0) {
+        say("WARN: failed to install cleaned {$account} crontab; backup: $backupPath", true);
+        return;
+    }
+
+    $removed = count($maliciousIndexes);
+    $state['actions'][] = [
+        'type' => 'remove_system_cron_persistence',
+        'relative_path' => "system-cron:$account",
+        'account' => $account,
+        'removed_entries' => $removed,
+        'backup' => $backupPath,
+        'at' => gmdate('c'),
+    ];
+    $state['summary']['actions_taken'] += $removed;
+    say("[CLEANED] Removed {$removed} confirmed malicious cron job(s) for {$account}; backup: $backupPath", true);
 }
 
 function audit_wp_config_persistence(string $root): void {

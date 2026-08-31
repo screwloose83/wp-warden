@@ -83,6 +83,21 @@ php wp-warden-pef-0.1.58.php /path/to/wordpress \
 
 Cleanup backs up the infected `wp-config.php` and each database option into the quarantine directory, removes only the confirmed injected block and matching options, and moves the exact `/tmp/php...` payload when it exists. The normal multi-site cleanup pass enables this guarded action automatically because it already supplies `--apply` and a per-site quarantine directory.
 
+## System Cron PHP-Recreation Persistence
+
+WP Warden audits the WordPress filesystem owner's crontab for confirmed jobs that recreate a missing PHP file from a long embedded Base64 payload. Detection is scoped to PHP targets inside the WordPress root currently being scanned, so unrelated cron jobs and sibling sites are not changed.
+
+Report-only cron auditing runs automatically. To back up the complete original crontab and remove only the matching persistence entries:
+
+```bash
+php wp-warden-pef-0.1.58.php /path/to/wordpress \
+  --apply \
+  --quarantine=/var/lib/wp-warden/quarantine/site \
+  --cleanup-malware-cron-auto
+```
+
+The multi-site wrapper enables this guarded cleanup during its first cleanup pass. The following verification pass audits the crontab again to confirm the persistence entry is gone.
+
 ## Fetch Official Checksums
 
 On an admin/build machine or a server with outbound HTTPS, you can fetch and cache official checksum sources into the intel directory:
