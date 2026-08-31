@@ -259,6 +259,8 @@ if ($wpVersion) {
 
 say("Auditing wp-content directories...", true);
 audit_wp_content_directories($wpRoot);
+say("Auditing suspicious upload bundles...", true);
+audit_malicious_upload_bundle_directories($wpRoot);
 say("Auditing known malicious plugin directory names...", true);
 audit_malicious_plugin_directories($wpRoot);
 say("Auditing wp-config.php persistence...", true);
@@ -451,11 +453,13 @@ function load_php_pattern_rules(string $intelDir): array {
     // expressions. Large malware files can embed entire third-party libraries,
     // making hundreds of generic whole-file regex checks unnecessarily slow.
     $priorityIds = [
-        'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001' => 0,
-        'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001' => 1,
-        'PHP_LEAFMAILER_FAMILY_001' => 2,
-        'PHP_LEAFMAILER_PASSWORD_GATE_001' => 3,
-        'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => 4,
+        'PHP_AXIL_QUERY_PARENT_UPLOAD_BACKDOOR_001' => 0,
+        'PHP_FRAGMENTED_SELF_TAIL_GZIP_EVAL_001' => 1,
+        'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001' => 2,
+        'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001' => 3,
+        'PHP_LEAFMAILER_FAMILY_001' => 4,
+        'PHP_LEAFMAILER_PASSWORD_GATE_001' => 5,
+        'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => 6,
     ];
     foreach ($rules as $index => &$loadedRule) {
         $loadedRule['_load_order'] = $index;
@@ -3475,6 +3479,124 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
     }
 }
 
+function audit_malicious_upload_bundle_directories(string $root): void {
+    $uploads = rtrim(normalize_path($root), '/') . '/wp-content/uploads';
+    if (!is_dir($uploads)) {
+        return;
+    }
+
+    $entries = @scandir($uploads);
+    if (!is_array($entries)) {
+        return;
+    }
+
+    foreach ($entries as $name) {
+        if ($name === '.' || $name === '..'
+            || preg_match('/^[0-9]{4}$/', $name) === 1
+            || preg_match('/^[a-z0-9]{6,20}$/i', $name) !== 1) {
+            continue;
+        }
+
+        $dir = $uploads . '/' . $name;
+        if (!is_dir($dir) || is_link($dir)) {
+            continue;
+        }
+
+        $signals = inspect_malicious_upload_bundle($dir);
+        $codeSignal = $signals['query_parent_uploader'] || $signals['fragmented_self_loader'];
+        $supportSignal = $signals['permissive_htaccess'] || $signals['hostile_php_ini'];
+        if (!$codeSignal || !$supportSignal) {
+            continue;
+        }
+
+        $sample = $signals['sample'] ?: first_regular_file_in_directory($dir);
+        if ($sample === null || !is_file($sample)) {
+            continue;
+        }
+
+        $found = [];
+        foreach (['query_parent_uploader', 'fragmented_self_loader', 'permissive_htaccess', 'hostile_php_ini'] as $key) {
+            if ($signals[$key]) {
+                $found[] = $key;
+            }
+        }
+
+        add_finding([
+            'severity' => 'critical',
+            'type' => 'malicious_upload_bundle_directory',
+            'rule_id' => 'BUILTIN_AXIL_UPLOAD_BUNDLE_001',
+            'path' => $sample,
+            'relative_path' => 'wp-content/uploads/' . $name . '/',
+            'reason' => 'Correlated malware bundle under uploads: ' . implode(', ', $found) . '.',
+            'directory_path' => $dir,
+            'bundle_signals' => $signals,
+            'recommended_action' => 'Quarantine the entire uploads bundle directory, including its loader, upload shell, .htaccess and php.ini.',
+        ], true);
+    }
+}
+
+function inspect_malicious_upload_bundle(string $dir): array {
+    $out = [
+        'files_sampled' => 0,
+        'query_parent_uploader' => false,
+        'fragmented_self_loader' => false,
+        'permissive_htaccess' => false,
+        'hostile_php_ini' => false,
+        'sample' => null,
+    ];
+
+    try {
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+        foreach ($it as $file) {
+            if (!$file->isFile() || $file->isLink() || $out['files_sampled'] >= 100) {
+                continue;
+            }
+            $out['files_sampled']++;
+            $size = $file->getSize();
+            if ($size < 1 || $size > 2097152) {
+                continue;
+            }
+            $path = normalize_path($file->getPathname());
+            $data = @file_get_contents($path);
+            if (!is_string($data)) {
+                continue;
+            }
+
+            $base = strtolower($file->getFilename());
+            if ($base === '.htaccess'
+                && stripos($data, 'FilesMatch') !== false
+                && stripos($data, 'Allow from all') !== false) {
+                $out['permissive_htaccess'] = true;
+                $out['sample'] = $out['sample'] ?: $path;
+            }
+            if ($base === 'php.ini'
+                && preg_match('/disable_functions\s*=\s*(?:none)?\s*$/im', $data) === 1
+                && preg_match('/open_basedir\s*=\s*(?:off)?\s*$/im', $data) === 1) {
+                $out['hostile_php_ini'] = true;
+                $out['sample'] = $out['sample'] ?: $path;
+            }
+            if (preg_match('/\$_GET\s*\[\s*[\'\"]f[\'\"]\s*\][\s\S]{0,400}\$_FILES\s*\[\s*[\'\"]file[\'\"]\s*\]/i', $data) === 1
+                && preg_match('/move_uploaded_file\s*\([\s\S]{0,500}[\'\"]\.\.\/[\'\"]\s*\./i', $data) === 1) {
+                $out['query_parent_uploader'] = true;
+                $out['sample'] = $path;
+            }
+            if (preg_match('/[\'\"]gzuncompre[\'\"]\s*\.\s*[\'\"]ss[\'\"]/i', $data) === 1
+                && stripos($data, '__FILE__') !== false
+                && preg_match('/eval\s*\(\s*\$[A-Za-z_][A-Za-z0-9_]*\s*\(/i', $data) === 1) {
+                $out['fragmented_self_loader'] = true;
+                $out['sample'] = $path;
+            }
+        }
+    } catch (UnexpectedValueException $e) {
+        // Permission and race errors are reported later by the normal scan.
+    }
+
+    return $out;
+}
+
 function make_scan_tree_iterator(string $rootNorm, array $intel): RecursiveIteratorIterator {
     $directory = new RecursiveDirectoryIterator($rootNorm, FilesystemIterator::SKIP_DOTS);
     $filter = new RecursiveCallbackFilterIterator($directory, function ($current) use ($rootNorm, $intel) {
@@ -4081,6 +4203,8 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
 
 function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes, array $rules, string $data): array {
     $fastIds = [
+        'PHP_AXIL_QUERY_PARENT_UPLOAD_BACKDOOR_001' => true,
+        'PHP_FRAGMENTED_SELF_TAIL_GZIP_EVAL_001' => true,
         'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001' => true,
         'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001' => true,
         'PHP_LEAFMAILER_FAMILY_001' => true,
@@ -4422,6 +4546,8 @@ function trusted_auto_quarantine_rule_ids(): array {
         // external/community rule CRITICAL is intentionally not sufficient.
         'PHP_WPHIDDENBOT_PERSISTENCE_001',
         'PHP_WPHIDDENBOT_HIDE_USER_003',
+        'PHP_AXIL_QUERY_PARENT_UPLOAD_BACKDOOR_001',
+        'PHP_FRAGMENTED_SELF_TAIL_GZIP_EVAL_001',
         'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001',
         'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001',
         'PHP_LEAFMAILER_FAMILY_001',
@@ -4447,6 +4573,17 @@ function maybe_auto_quarantine_malware_finding(array $finding): bool {
     $src = $finding['path'] ?? null;
     if (!$src || !is_file($src)) {
         return false;
+    }
+
+    if ($type === 'malicious_upload_bundle_directory'
+        && $ruleId === 'BUILTIN_AXIL_UPLOAD_BUNDLE_001') {
+        $finding['id'] = finding_id($finding);
+        say(
+            "[AUTO-QUARANTINE-UPLOAD-BUNDLE] {$finding['relative_path']} " .
+            "[$ruleId] - quarantining entire malware bundle directory",
+            true
+        );
+        return quarantine_upload_bundle_directory_for_finding($finding);
     }
 
     if ($type === 'malicious_plugin_directory' && in_array($ruleId, [
@@ -4545,6 +4682,52 @@ function trusted_rule_should_quarantine_plugin_directory(array $finding): bool {
 
     $rel = normalize_relative((string)($finding['relative_path'] ?? ''));
     return preg_match('#^wp-content/plugins/[^/]+/#', $rel) === 1;
+}
+
+function quarantine_upload_bundle_directory_for_finding(array $finding): bool {
+    global $quarantineDir, $state;
+
+    $rel = normalize_relative((string)($finding['relative_path'] ?? ''));
+    $dir = normalize_path((string)($finding['directory_path'] ?? ''));
+    if (preg_match('#^wp-content/uploads/([a-z0-9]{6,20})/$#i', $rel, $m) !== 1
+        || preg_match('/^[0-9]{4}$/', $m[1]) === 1
+        || !is_dir($dir) || is_link($dir)) {
+        return false;
+    }
+
+    $marker = '/wp-content/uploads/' . $m[1];
+    if (substr($dir, -strlen($marker)) !== $marker) {
+        return false;
+    }
+
+    $dest = rtrim(normalize_path($quarantineDir), '/') . '/wp-content/uploads/' . $m[1];
+    if (file_exists($dest)) {
+        $dest .= '.quarantine-' . gmdate('Ymd-His') . '-' . getmypid();
+    }
+    if (!is_dir(dirname($dest))
+        && !@mkdir(dirname($dest), 0755, true)
+        && !is_dir(dirname($dest))) {
+        say("[QUARANTINE-FAIL] Could not create quarantine directory: " . dirname($dest), true);
+        return false;
+    }
+    if (!@rename($dir, $dest)) {
+        say("[QUARANTINE-FAIL] Could not move uploads bundle $rel to $dest", true);
+        return false;
+    }
+
+    $action = [
+        'type' => 'quarantine_upload_bundle_directory',
+        'finding_id' => $finding['id'],
+        'rule_id' => (string)$finding['rule_id'],
+        'from' => $dir,
+        'to' => $dest,
+        'at' => gmdate('c'),
+    ];
+    $state['actions'][] = $action;
+    $state['summary']['actions_taken']++;
+    write_quarantine_manifest($action, $finding);
+    say("Quarantined uploads malware bundle: $rel", true);
+    return !is_dir($dir);
 }
 
 function quarantine_plugin_directory_for_finding(array $finding): bool {
