@@ -49,10 +49,56 @@ quarantine_root(){
     esac
 }
 
+cwp_domain_from_owner_map(){
+    local SITE_ID="$1" MAP DOMAIN OWNER
+    for MAP in /etc/trueuserdomains /etc/userdomains /etc/virtual/domainowners; do
+        [ -r "$MAP" ] || continue
+        while IFS=: read -r DOMAIN OWNER; do
+            DOMAIN="$(printf '%s' "$DOMAIN" | tr -d '[:space:]')"
+            OWNER="$(printf '%s' "$OWNER" | tr -d '[:space:]')"
+            if [ "$OWNER" = "$SITE_ID" ] && [ -n "$DOMAIN" ]; then
+                echo "$DOMAIN"
+                return 0
+            fi
+        done < "$MAP"
+    done
+    return 1
+}
+
+cwp_domain_from_vhost(){
+    local SITE_ROOT="$1" CONF DOMAIN DOCROOT
+    for CONF in \
+        /usr/local/apache/conf.d/vhosts/*.conf \
+        /usr/local/apache/conf.d/vhosts-ssl/*.conf \
+        /etc/httpd/conf.d/vhosts/*.conf \
+        /etc/nginx/conf.d/vhosts/*.conf; do
+        [ -r "$CONF" ] || continue
+        DOMAIN=$(awk 'tolower($1)=="servername" {print $2; exit}' "$CONF" 2>/dev/null)
+        DOCROOT=$(awk 'tolower($1)=="documentroot" {gsub(/\"/, "", $2); print $2; exit}' "$CONF" 2>/dev/null)
+        if [ -n "$DOMAIN" ] && [ "${DOCROOT%/}" = "${SITE_ROOT%/}" ]; then
+            echo "$DOMAIN"
+            return 0
+        fi
+    done
+    return 1
+}
+
 site_domain(){
     local PLATFORM="$1" SITE_ID="$2" SITE_ROOT="$3" URL
     if [ "$PLATFORM" = "apiscp" ]; then
         echo "$SITE_ID"
+        return 0
+    fi
+
+    URL=$(cwp_domain_from_owner_map "$SITE_ID" || true)
+    if [ -n "$URL" ]; then
+        echo "$URL"
+        return 0
+    fi
+
+    URL=$(cwp_domain_from_vhost "$SITE_ROOT" || true)
+    if [ -n "$URL" ]; then
+        echo "$URL"
         return 0
     fi
 
