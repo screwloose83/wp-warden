@@ -3965,6 +3965,15 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
         }
     }
 
+    // Exact, locally reviewed family rules run before generic built-in and
+    // community heuristics. This prevents large malware files containing whole
+    // vendor libraries from spending minutes in broad regexes before reaching
+    // a decisive signature near the start of the file.
+    $fastMatchedRuleIds = scan_fast_trusted_family_rules($path, $rel, $hashes, $rules, $data);
+    if (!is_file($path)) {
+        return;
+    }
+
     scan_builtin_text_heuristics($path, $rel, $hashes, $data);
 
     // A built-in automatic quarantine may have moved the file. Do not emit
@@ -3980,6 +3989,9 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
     $lines = null;
 
     foreach ($rules as $rule) {
+        if (isset($fastMatchedRuleIds[(string)($rule['id'] ?? '')])) {
+            continue;
+        }
         $pattern = $rule['pattern'] ?? null;
         if (!is_string($pattern) || $pattern === '') {
             continue;
@@ -4057,6 +4069,65 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
             }
         }
     }
+}
+
+function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes, array $rules, string $data): array {
+    $fastIds = [
+        'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001' => true,
+        'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001' => true,
+        'PHP_LEAFMAILER_FAMILY_001' => true,
+        'PHP_LEAFMAILER_PASSWORD_GATE_001' => true,
+        'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => true,
+    ];
+    $matchedIds = [];
+
+    foreach ($rules as $rule) {
+        $ruleId = (string)($rule['id'] ?? '');
+        if (!isset($fastIds[$ruleId])) {
+            continue;
+        }
+        foreach (($rule['_anchors'] ?? []) as $anchor) {
+            if (stripos($data, $anchor) === false) {
+                continue 2;
+            }
+        }
+
+        $pattern = $rule['pattern'] ?? null;
+        if (!is_string($pattern) || $pattern === '') {
+            continue;
+        }
+        if (($rule['_match_mode'] ?? 'regex') === 'literal') {
+            $matched = stripos($data, (string)($rule['_literal'] ?? $pattern)) !== false;
+        } else {
+            $regex = $rule['_regex'] ?? ('~' . str_replace('~', '\\~', $pattern) . '~i');
+            $matched = @preg_match($regex, $data) === 1;
+        }
+        if (!$matched) {
+            continue;
+        }
+
+        $matchedIds[$ruleId] = true;
+        add_finding([
+            'severity' => $rule['severity'] ?? 'critical',
+            'type' => 'php_rule_match',
+            'rule_id' => $ruleId,
+            'rule_pattern' => $pattern,
+            'rule_source' => $rule['source'] ?? $rule['category'] ?? null,
+            'path' => $path,
+            'relative_path' => $rel,
+            'line' => null,
+            'matched_text' => null,
+            'reason' => $rule['description'] ?? 'Reviewed PHP malware family signature matched.',
+            'hashes' => $hashes,
+            'recommended_action' => 'Quarantine the file and investigate related persistence.',
+        ], true);
+
+        if (!is_file($path)) {
+            break;
+        }
+    }
+
+    return $matchedIds;
 }
 
 function should_run_external_php_rules(string $rel, string $data): bool {
