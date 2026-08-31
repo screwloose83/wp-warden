@@ -74,6 +74,67 @@ cwp_domain_from_owner_map(){
     return 1
 }
 
+cwp_owner_for_domain(){
+    local REQUESTED="${1,,}" MAP DOMAIN OWNER
+    for MAP in /etc/trueuserdomains /etc/userdomains /etc/virtual/domainowners; do
+        [ -r "$MAP" ] || continue
+        while IFS=: read -r DOMAIN OWNER; do
+            DOMAIN="$(printf '%s' "$DOMAIN" | tr -d '[:space:]')"
+            OWNER="$(printf '%s' "$OWNER" | tr -d '[:space:]')"
+            if [ "${DOMAIN,,}" = "$REQUESTED" ] && [ -n "$OWNER" ]; then
+                echo "$OWNER"
+                return 0
+            fi
+        done < "$MAP"
+    done
+    return 1
+}
+
+cwp_root_from_domain_vhost(){
+    local REQUESTED="${1,,}" CONF DOMAIN DOCROOT ALIASES
+    for CONF in \
+        /usr/local/apache/conf.d/vhosts/*.conf \
+        /usr/local/apache/conf.d/vhosts-ssl/*.conf \
+        /etc/httpd/conf.d/vhosts/*.conf \
+        /etc/nginx/conf.d/vhosts/*.conf; do
+        [ -r "$CONF" ] || continue
+        DOMAIN=$(awk 'tolower($1)=="servername" || tolower($1)=="server_name" {gsub(/;/, "", $2); print tolower($2); exit}' "$CONF" 2>/dev/null)
+        ALIASES=$(awk 'tolower($1)=="serveralias" || tolower($1)=="server_name" {$1=""; gsub(/;/, ""); print tolower($0)}' "$CONF" 2>/dev/null)
+        if [ "$DOMAIN" != "$REQUESTED" ] && ! printf ' %s ' "$ALIASES" | grep -Fqi " $REQUESTED "; then
+            continue
+        fi
+        DOCROOT=$(awk 'tolower($1)=="documentroot" || tolower($1)=="root" {gsub(/[";]/, "", $2); print $2; exit}' "$CONF" 2>/dev/null)
+        if [ -n "$DOCROOT" ] && [ -f "${DOCROOT%/}/wp-config.php" ]; then
+            printf '%s\n' "${DOCROOT%/}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_requested_cwp_site(){
+    local REQUESTED="$1" OWNER ROOT
+    ROOT="$(cwp_root_from_domain_vhost "$REQUESTED" || true)"
+    OWNER="$(cwp_owner_for_domain "$REQUESTED" || true)"
+
+    if [ -n "$ROOT" ]; then
+        [ -n "$OWNER" ] || OWNER="$(basename "$(dirname "$ROOT")")"
+        printf 'cwp|%s|%s|%s\n' "$OWNER" "$ROOT" "$REQUESTED"
+        return 0
+    fi
+
+    # CWP's primary domain normally maps to /home/USER/public_html. This
+    # fallback is useful when the generated vhost layout differs by release.
+    if [ -n "$OWNER" ]; then
+        ROOT="${CWP_HOME_ROOT}/${OWNER}/public_html"
+        if [ -f "$ROOT/wp-config.php" ]; then
+            printf 'cwp|%s|%s|%s\n' "$OWNER" "$ROOT" "$REQUESTED"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 cwp_domain_from_vhost(){
     local SITE_ROOT="$1" CONF DOMAIN DOCROOT
     for CONF in \
@@ -616,6 +677,10 @@ while IFS= read -r ENTRY; do
         break
     fi
 done < <(discover_sites)
+
+if [ -z "$MATCH" ]; then
+    MATCH="$(resolve_requested_cwp_site "$DOMAIN" || true)"
+fi
 
 [ -n "$MATCH" ] || { echo "ERROR: WordPress site not found for: $DOMAIN"; exit 1; }
 IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DISCOVERED_DOMAIN <<< "$MATCH"
