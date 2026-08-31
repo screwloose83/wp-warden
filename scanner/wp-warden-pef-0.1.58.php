@@ -39,6 +39,7 @@ $maxTextSizeMb = isset($opts['max-text-size']) ? max(1, (int)$opts['max-text-siz
 $quiet = isset($opts['quiet']);
 $debugProgress = isset($opts['debug-progress']);
 $newestFirst = isset($opts['newest-first']);
+$recentPhpDays = isset($opts['recent-php-days']) ? max(1, (int)$opts['recent-php-days']) : null;
 $fetchOfficialChecksums = isset($opts['fetch-official-checksums']) || isset($opts['fetch-official']);
 $quarantineExtraAuto = isset($opts['quarantine-extra-auto']);
 $quarantineExtraCoreAuto = isset($opts['quarantine-extra-core-auto']);
@@ -193,6 +194,7 @@ say("Intel:  $intelDir", true);
 say("Policy: $policyId", true);
 if ($excludePdf) { say("Mode:   PDF files excluded from scanning (--exclude-pdf)", true); }
 if ($newestFirst) { say("Mode:   newest files scanned first (--newest-first)", true); }
+if ($recentPhpDays !== null) { say("Mode:   QUICK SWEEP - only PHP-like files modified in the last {$recentPhpDays} day(s); this is not a full scan", true); }
 if ($fileCacheEnabled) {
     say("Cache:  $fileCachePath", true);
     say("Cache:  " . count($fileCacheEntries) . " clean file entries loaded", true);
@@ -314,6 +316,7 @@ function print_help(): void {
     echo "  --quarantine-wp-content-auto  With --apply and --quarantine, quarantine HIGH/CRITICAL unexpected wp-content directories\n";
     echo "  --debug-progress        Print each file path before scanning it\n";
     echo "  --newest-first          Scan eligible files by modification time, newest first; all files are still scanned\n";
+    echo "  --recent-php-days=N     Quick sweep only PHP-like files modified in the last N days; not a replacement for a full scan\n";
     echo "  --quiet                 Less console output\n";
     echo "  --help                  Show this help\n\n";
     echo "EXAMPLES:\n";
@@ -3197,7 +3200,7 @@ function looks_like_long_encoded_payload(string $path): bool {
 }
 
 function scan_tree(string $root, array $intel, array $coreChecksums, array $componentChecksums): void {
-    global $maxSizeMb, $verifyAll, $state, $debugProgress, $fileCacheEnabled, $excludePdf, $newestFirst;
+    global $maxSizeMb, $verifyAll, $state, $debugProgress, $fileCacheEnabled, $excludePdf, $newestFirst, $recentPhpDays;
 
     $rootNorm = normalize_path(realpath($root) ?: $root);
     $directory = new RecursiveDirectoryIterator($rootNorm, FilesystemIterator::SKIP_DOTS);
@@ -3211,7 +3214,16 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
     $iterator = new RecursiveIteratorIterator($filter);
 
     if ($newestFirst) {
-        $orderedFiles = iterator_to_array($iterator, false);
+        $orderedFiles = [];
+        foreach ($iterator as $candidate) {
+            if (!$candidate->isFile()) {
+                continue;
+            }
+            if ($recentPhpDays !== null && !is_recent_php_candidate($candidate->getPathname(), $recentPhpDays)) {
+                continue;
+            }
+            $orderedFiles[] = $candidate;
+        }
         usort($orderedFiles, static function (SplFileInfo $a, SplFileInfo $b): int {
             $aTime = @filemtime($a->getPathname());
             $bTime = @filemtime($b->getPathname());
@@ -3229,6 +3241,9 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
         }
 
         $path = $file->getPathname();
+        if ($recentPhpDays !== null && !is_recent_php_candidate($path, $recentPhpDays)) {
+            continue;
+        }
         $rel = normalize_relative(fast_relative_path($rootNorm, $path));
         stats_inc('files_seen');
 
@@ -3301,6 +3316,16 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
             file_cache_mark_clean($path, $rel);
         }
     }
+}
+
+function is_recent_php_candidate(string $path, int $days): bool {
+    $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+    if (!is_php_like_extension($ext)) {
+        return false;
+    }
+
+    $mtime = @filemtime($path);
+    return is_int($mtime) && $mtime >= (time() - ($days * 86400));
 }
 
 function is_benign_index_placeholder(string $path, string $rel): bool {

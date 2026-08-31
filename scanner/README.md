@@ -231,6 +231,7 @@ Best speed improvements:
 - Add large backup/cache folders to `policy/default.json` `skip_relative_prefixes` if you do not want to scan archives on every run.
 - Use `--debug-progress` only for troubleshooting; it prints every file and slows scans.
 - Use `--newest-first` to inspect recently modified files earlier while still completing the full scan. This changes ordering only; malware can forge or backdate timestamps.
+- Use `--recent-php-days=N` for an opt-in quick sweep of recently modified PHP-like files. It is faster but incomplete: follow it with a full scan because malware can use non-PHP extensions or forged timestamps.
 
 ## Notes
 
