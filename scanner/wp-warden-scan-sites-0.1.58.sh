@@ -580,7 +580,7 @@ scan_all(){
  echo; echo "Logs: $RUN_LOG_DIR"; line; [ "$DIRTY_COUNT" -gt 0 ] && return 1 || return 0
 }
 
-POSITIONAL=()
+TARGET_ARG=""
 for ARG in "$@"; do
     case "$ARG" in
         --recent-php-days=*)
@@ -589,10 +589,14 @@ for ARG in "$@"; do
             [ -z "$RECENT_PHP_OPTION" ] || { echo "ERROR: --recent-php-days may only be specified once"; exit 1; }
             RECENT_PHP_OPTION="--recent-php-days=$RECENT_PHP_DAYS"
             ;;
-        *) POSITIONAL+=("$ARG") ;;
+        *)
+            [ -z "$TARGET_ARG" ] || usage
+            TARGET_ARG="$ARG"
+            ;;
     esac
 done
-set -- "${POSITIONAL[@]}"
+set --
+[ -z "$TARGET_ARG" ] || set -- "$TARGET_ARG"
 
 cleanup_old_logs
 if [ "${1:-}" = "--check-updates" ]; then check_updates 1; exit $?; fi
