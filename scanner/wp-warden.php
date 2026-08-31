@@ -1295,38 +1295,10 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
     global $maxSizeMb, $verifyAll, $state, $debugProgress, $newestFirst, $recentPhpDays;
 
     $rootNorm = normalize_path(realpath($root) ?: $root);
-    $directory = new RecursiveDirectoryIterator($rootNorm, FilesystemIterator::SKIP_DOTS);
-    $filter = new RecursiveCallbackFilterIterator($directory, function ($current) use ($rootNorm, $intel) {
-        $rel = fast_relative_path($rootNorm, $current->getPathname());
-        if ($current->isDir() && should_skip_path($rel . '/', $intel)) {
-            return false;
-        }
-        return true;
-    });
-    $iterator = new RecursiveIteratorIterator(
-        $filter
-    );
+    $iterator = make_scan_tree_iterator($rootNorm, $intel);
 
     if ($newestFirst) {
-        $orderedFiles = [];
-        foreach ($iterator as $candidate) {
-            if (!$candidate->isFile()) {
-                continue;
-            }
-            if ($recentPhpDays !== null && !is_recent_php_candidate($candidate->getPathname(), $recentPhpDays)) {
-                continue;
-            }
-            $orderedFiles[] = $candidate;
-        }
-        usort($orderedFiles, static function (SplFileInfo $a, SplFileInfo $b): int {
-            $aTime = @filemtime($a->getPathname());
-            $bTime = @filemtime($b->getPathname());
-            $aTime = is_int($aTime) ? $aTime : 0;
-            $bTime = is_int($bTime) ? $bTime : 0;
-            return $bTime <=> $aTime ?: strcmp($a->getPathname(), $b->getPathname());
-        });
-        $iterator = $orderedFiles;
-        say('Newest-first ordering prepared for ' . count($orderedFiles) . ' filesystem entries.');
+        $iterator = newest_first_scan_iterable($iterator, $rootNorm, $intel, $recentPhpDays);
     }
 
     foreach ($iterator as $file) {
@@ -1360,6 +1332,72 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
             say("Scanning file: $rel", true);
         }
         scan_one_file($root, $path, $rel, $intel, $coreChecksums, $componentChecksums, $verifyAll);
+    }
+}
+
+function make_scan_tree_iterator(string $rootNorm, array $intel): RecursiveIteratorIterator {
+    $directory = new RecursiveDirectoryIterator($rootNorm, FilesystemIterator::SKIP_DOTS);
+    $filter = new RecursiveCallbackFilterIterator($directory, function ($current) use ($rootNorm, $intel) {
+        $rel = fast_relative_path($rootNorm, $current->getPathname());
+        if ($current->isDir() && should_skip_path($rel . '/', $intel)) {
+            return false;
+        }
+        return true;
+    });
+    return new RecursiveIteratorIterator($filter);
+}
+
+function newest_first_scan_iterable(RecursiveIteratorIterator $iterator, string $rootNorm, array $intel, ?int $recentPhpDays): Generator {
+    $limit = 5000;
+    $eligible = 0;
+    $heap = new SplPriorityQueue();
+    $heap->setExtractFlags(SplPriorityQueue::EXTR_BOTH);
+
+    foreach ($iterator as $candidate) {
+        if (!$candidate->isFile()) {
+            continue;
+        }
+        $path = $candidate->getPathname();
+        if ($recentPhpDays !== null && !is_recent_php_candidate($path, $recentPhpDays)) {
+            continue;
+        }
+        $mtime = @filemtime($path);
+        $mtime = is_int($mtime) ? $mtime : 0;
+        $eligible++;
+        $heap->insert($path, -$mtime);
+        if ($heap->count() > $limit) {
+            $heap->extract();
+        }
+    }
+
+    $newestPaths = [];
+    while (!$heap->isEmpty()) {
+        $entry = $heap->extract();
+        $newestPaths[] = (string)$entry['data'];
+    }
+    $newestPaths = array_reverse($newestPaths);
+    $prioritized = array_fill_keys($newestPaths, true);
+
+    say('Newest-first priority prepared: ' . count($newestPaths) . " newest of {$eligible} eligible files; remaining files follow in normal order.");
+
+    foreach ($newestPaths as $path) {
+        if (is_file($path)) {
+            yield new SplFileInfo($path);
+        }
+    }
+
+    foreach (make_scan_tree_iterator($rootNorm, $intel) as $candidate) {
+        if (!$candidate->isFile()) {
+            continue;
+        }
+        $path = $candidate->getPathname();
+        if (isset($prioritized[$path])) {
+            continue;
+        }
+        if ($recentPhpDays !== null && !is_recent_php_candidate($path, $recentPhpDays)) {
+            continue;
+        }
+        yield $candidate;
     }
 }
 
