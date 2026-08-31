@@ -455,11 +455,12 @@ function load_php_pattern_rules(string $intelDir): array {
     $priorityIds = [
         'PHP_AXIL_QUERY_PARENT_UPLOAD_BACKDOOR_001' => 0,
         'PHP_FRAGMENTED_SELF_TAIL_GZIP_EVAL_001' => 1,
-        'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001' => 2,
-        'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001' => 3,
-        'PHP_LEAFMAILER_FAMILY_001' => 4,
-        'PHP_LEAFMAILER_PASSWORD_GATE_001' => 5,
-        'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => 6,
+        'PHP_FRAGMENTED_ROT13_GZINFLATE_EVAL_001' => 2,
+        'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001' => 3,
+        'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001' => 4,
+        'PHP_LEAFMAILER_FAMILY_001' => 5,
+        'PHP_LEAFMAILER_PASSWORD_GATE_001' => 6,
+        'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => 7,
     ];
     foreach ($rules as $index => &$loadedRule) {
         $loadedRule['_load_order'] = $index;
@@ -3167,6 +3168,12 @@ function audit_malicious_plugin_directories(string $root): void {
         }
 
         $ioc = malicious_plugin_slug_ioc($slug);
+        if ($ioc === null && randomized_protect_uploads_plugin_ioc($pluginDir, $slug)) {
+            $ioc = [
+                'rule_id' => 'BUILTIN_RANDOMIZED_PROTECT_UPLOADS_PLUGIN_001',
+                'family' => 'randomized Protect Uploads malware carrier',
+            ];
+        }
         if ($ioc === null) {
             continue;
         }
@@ -3477,6 +3484,37 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
             file_cache_mark_clean($path, $rel);
         }
     }
+}
+
+function randomized_protect_uploads_plugin_ioc(string $pluginDir, string $slug): bool {
+    // The legitimate plugin uses the protect-uploads slug. This malware family
+    // clones it into a random seven-letter directory and adds a hostile php.ini.
+    if (preg_match('/^[a-z]{7}$/i', $slug) !== 1) {
+        return false;
+    }
+
+    $main = $pluginDir . '/protect-uploads.php';
+    $admin = $pluginDir . '/admin/class-protect-uploads-admin.php';
+    $ini = $pluginDir . '/php.ini';
+    if (!is_file($main) || !is_file($admin) || !is_file($ini)) {
+        return false;
+    }
+
+    $mainData = @file_get_contents($main, false, null, 0, 32768);
+    $adminData = @file_get_contents($admin, false, null, 0, 32768);
+    $iniData = @file_get_contents($ini, false, null, 0, 4096);
+    if (!is_string($mainData) || !is_string($adminData) || !is_string($iniData)) {
+        return false;
+    }
+
+    $isProtectUploads = stripos($mainData, 'Protect Uploads') !== false
+        && stripos($mainData, 'Alti_ProtectUploads') !== false
+        && stripos($adminData, 'Alti_ProtectUploads_Admin') !== false;
+    $hostileIni = preg_match('/disable_functions\s*=\s*(?:none)?\s*$/im', $iniData) === 1
+        && preg_match('/open_basedir\s*=\s*(?:off)?\s*$/im', $iniData) === 1
+        && preg_match('/shell_exec\s*=\s*on\s*$/im', $iniData) === 1;
+
+    return $isProtectUploads && $hostileIni;
 }
 
 function audit_malicious_upload_bundle_directories(string $root): void {
@@ -4205,6 +4243,7 @@ function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes
     $fastIds = [
         'PHP_AXIL_QUERY_PARENT_UPLOAD_BACKDOOR_001' => true,
         'PHP_FRAGMENTED_SELF_TAIL_GZIP_EVAL_001' => true,
+        'PHP_FRAGMENTED_ROT13_GZINFLATE_EVAL_001' => true,
         'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001' => true,
         'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001' => true,
         'PHP_LEAFMAILER_FAMILY_001' => true,
@@ -4548,6 +4587,7 @@ function trusted_auto_quarantine_rule_ids(): array {
         'PHP_WPHIDDENBOT_HIDE_USER_003',
         'PHP_AXIL_QUERY_PARENT_UPLOAD_BACKDOOR_001',
         'PHP_FRAGMENTED_SELF_TAIL_GZIP_EVAL_001',
+        'PHP_FRAGMENTED_ROT13_GZINFLATE_EVAL_001',
         'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001',
         'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001',
         'PHP_LEAFMAILER_FAMILY_001',
@@ -4589,6 +4629,7 @@ function maybe_auto_quarantine_malware_finding(array $finding): bool {
     if ($type === 'malicious_plugin_directory' && in_array($ruleId, [
         'BUILTIN_WP2SHELL_PLUGIN_DIR_001',
         'BUILTIN_GALEX_WEBSHELL_PLUGIN_DIR_001',
+        'BUILTIN_RANDOMIZED_PROTECT_UPLOADS_PLUGIN_001',
     ], true)) {
         $finding['id'] = finding_id($finding);
         say(
