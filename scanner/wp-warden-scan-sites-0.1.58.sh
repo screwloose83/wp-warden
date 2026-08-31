@@ -19,7 +19,8 @@ usage(){ echo "Usage: $0 domain.com.au | --all | --check-updates | --self-update
 line(){ echo "======================================================================"; }
 find_warden(){ find "${REPO_ROOT}/scanner" -maxdepth 1 -type f -name 'wp-warden-pef-*.php' -printf '%f\n' 2>/dev/null | sort -V | tail -n 1 | sed "s#^#${REPO_ROOT}/scanner/#"; }
 scanner_version_from_path(){ basename "$1" | sed -nE 's/^wp-warden-(pef|scan-sites)-([0-9]+\.[0-9]+\.[0-9]+)\.(php|sh)$/\2/p'; }
-github_scanner_file(){ git -C "$REPO_ROOT" ls-tree -r --name-only origin/main -- scanner 2>/dev/null | grep -E '^scanner/wp-warden-pef-[0-9]+\.[0-9]+\.[0-9]+\.php$' | sort -V | tail -n 1; }
+repo_git(){ (cd "$REPO_ROOT" && git "$@"); }
+github_scanner_file(){ repo_git ls-tree -r --name-only origin/main -- scanner 2>/dev/null | grep -E '^scanner/wp-warden-pef-[0-9]+\.[0-9]+\.[0-9]+\.php$' | sort -V | tail -n 1; }
 site_root(){
     local PLATFORM="$1" SITE_ID="$2" ROOT="${3:-}"
     case "$PLATFORM" in
@@ -98,7 +99,7 @@ check_updates(){
         echo "  [WARNING] Update check unavailable: ${REPO_ROOT} is not a Git checkout."
         return 0
     fi
-    if ! git -C "$REPO_ROOT" fetch --quiet origin main; then
+    if ! repo_git fetch --quiet origin main; then
         echo "  [WARNING] Update check failed; continuing with installed files."
         return 0
     fi
@@ -109,12 +110,12 @@ check_updates(){
     [ -n "$INSTALLED_VERSION" ] || INSTALLED_VERSION=$(scanner_version_from_path "$INSTALLED_SCANNER")
     GITHUB_SCANNER=$(github_scanner_file)
     GITHUB_VERSION=$(scanner_version_from_path "$GITHUB_SCANNER")
-    LOCAL_COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
-    GITHUB_COMMIT=$(git -C "$REPO_ROOT" rev-parse --short origin/main 2>/dev/null || echo unknown)
+    LOCAL_COMMIT=$(repo_git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    GITHUB_COMMIT=$(repo_git rev-parse --short origin/main 2>/dev/null || echo unknown)
     echo "  Installed scanner: ${INSTALLED_VERSION:-unknown} (commit $LOCAL_COMMIT)"
     echo "  GitHub scanner:    ${GITHUB_VERSION:-unknown} (main $GITHUB_COMMIT)"
 
-    REMOTE_DIFF=$(git -C "$REPO_ROOT" diff --name-only HEAD..origin/main -- scanner intel/patterns intel/clean-zips intel/checksums 2>/dev/null || true)
+    REMOTE_DIFF=$(repo_git diff --name-only HEAD..origin/main -- scanner intel/patterns intel/clean-zips intel/checksums 2>/dev/null || true)
     if printf '%s\n' "$REMOTE_DIFF" | grep -q '^scanner/'; then
         echo "  [UPDATE] scanner (${INSTALLED_VERSION:-unknown} -> ${GITHUB_VERSION:-unknown})"
         HAS_UPDATES=1
@@ -126,9 +127,9 @@ check_updates(){
         TMP=$(mktemp -d)
         SOURCE="${TMP}/intel/${CATEGORY}"
         TARGET="${INTEL_ROOT}/${CATEGORY}"
-        if ! git -C "$REPO_ROOT" cat-file -e "origin/main:intel/${CATEGORY}" 2>/dev/null; then
+        if ! repo_git cat-file -e "origin/main:intel/${CATEGORY}" 2>/dev/null; then
             echo "  [NOT PUBLISHED] wp-warden-intel/${CATEGORY}"
-        elif ! git -C "$REPO_ROOT" archive origin/main -- "intel/${CATEGORY}" 2>/dev/null | tar -x -C "$TMP" 2>/dev/null; then
+        elif ! repo_git archive origin/main -- "intel/${CATEGORY}" 2>/dev/null | tar -x -C "$TMP" 2>/dev/null; then
             echo "  [WARNING] Could not compare wp-warden-intel/${CATEGORY}."
         elif tree_needs_update "$SOURCE" "$TARGET"; then
             echo "  [UPDATE] wp-warden-intel/${CATEGORY}"
@@ -150,12 +151,12 @@ self_update(){
     echo ">>> UPDATING WP-WARDEN"
     command -v git >/dev/null 2>&1 || { echo "ERROR: git is required for --self-update"; return 1; }
     [ -d "${REPO_ROOT}/.git" ] || { echo "ERROR: ${REPO_ROOT} is not a Git checkout"; return 1; }
-    git -C "$REPO_ROOT" diff --quiet && git -C "$REPO_ROOT" diff --cached --quiet || {
+    repo_git diff --quiet && repo_git diff --cached --quiet || {
         echo "ERROR: Local repository changes detected; nothing was overwritten."
         return 1
     }
-    git -C "$REPO_ROOT" fetch origin main || return 1
-    git -C "$REPO_ROOT" merge --ff-only origin/main || {
+    repo_git fetch origin main || return 1
+    repo_git merge --ff-only origin/main || {
         echo "ERROR: Update is not a clean fast-forward; local changes were preserved."
         return 1
     }
@@ -413,6 +414,8 @@ scan_site(){
 discover_sites(){
     local d ROOT USER DOMAIN
 
+    {
+
     # ApisCP: /home/virtual/domain.tld/var/www/html
     if [ -d "$VIRTUAL_ROOT" ]; then
         find "$VIRTUAL_ROOT" -maxdepth 1 \( -type l -o -type d \) -printf '%f\n' 2>/dev/null | while read -r d; do
@@ -430,7 +433,8 @@ discover_sites(){
         DOMAIN="$(site_domain cwp "$USER" "$ROOT")"
         printf 'cwp|%s|%s|%s\n' "$USER" "$ROOT" "$DOMAIN"
     done
-} | sort -u
+    } | sort -u
+}
 
 aggregate_health(){
  local -a reports=("${RUN_LOG_DIR}"/*-"${RUN_TIME}".json)
