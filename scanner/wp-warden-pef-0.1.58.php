@@ -38,6 +38,7 @@ $maxSizeMb = isset($opts['max-size']) ? max(1, (int)$opts['max-size']) : 10;
 $maxTextSizeMb = isset($opts['max-text-size']) ? max(1, (int)$opts['max-text-size']) : 5;
 $quiet = isset($opts['quiet']);
 $debugProgress = isset($opts['debug-progress']);
+$newestFirst = isset($opts['newest-first']);
 $fetchOfficialChecksums = isset($opts['fetch-official-checksums']) || isset($opts['fetch-official']);
 $quarantineExtraAuto = isset($opts['quarantine-extra-auto']);
 $quarantineExtraCoreAuto = isset($opts['quarantine-extra-core-auto']);
@@ -191,6 +192,7 @@ say("Target: $wpRoot", true);
 say("Intel:  $intelDir", true);
 say("Policy: $policyId", true);
 if ($excludePdf) { say("Mode:   PDF files excluded from scanning (--exclude-pdf)", true); }
+if ($newestFirst) { say("Mode:   newest files scanned first (--newest-first)", true); }
 if ($fileCacheEnabled) {
     say("Cache:  $fileCachePath", true);
     say("Cache:  " . count($fileCacheEntries) . " clean file entries loaded", true);
@@ -311,6 +313,7 @@ function print_help(): void {
     echo "  --allow-wp-content-dir=a,b  Allow additional top-level wp-content directories (comma-separated)\n";
     echo "  --quarantine-wp-content-auto  With --apply and --quarantine, quarantine HIGH/CRITICAL unexpected wp-content directories\n";
     echo "  --debug-progress        Print each file path before scanning it\n";
+    echo "  --newest-first          Scan eligible files by modification time, newest first; all files are still scanned\n";
     echo "  --quiet                 Less console output\n";
     echo "  --help                  Show this help\n\n";
     echo "EXAMPLES:\n";
@@ -3194,7 +3197,7 @@ function looks_like_long_encoded_payload(string $path): bool {
 }
 
 function scan_tree(string $root, array $intel, array $coreChecksums, array $componentChecksums): void {
-    global $maxSizeMb, $verifyAll, $state, $debugProgress, $fileCacheEnabled, $excludePdf;
+    global $maxSizeMb, $verifyAll, $state, $debugProgress, $fileCacheEnabled, $excludePdf, $newestFirst;
 
     $rootNorm = normalize_path(realpath($root) ?: $root);
     $directory = new RecursiveDirectoryIterator($rootNorm, FilesystemIterator::SKIP_DOTS);
@@ -3206,6 +3209,19 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
         return true;
     });
     $iterator = new RecursiveIteratorIterator($filter);
+
+    if ($newestFirst) {
+        $orderedFiles = iterator_to_array($iterator, false);
+        usort($orderedFiles, static function (SplFileInfo $a, SplFileInfo $b): int {
+            $aTime = @filemtime($a->getPathname());
+            $bTime = @filemtime($b->getPathname());
+            $aTime = is_int($aTime) ? $aTime : 0;
+            $bTime = is_int($bTime) ? $bTime : 0;
+            return $bTime <=> $aTime ?: strcmp($a->getPathname(), $b->getPathname());
+        });
+        $iterator = $orderedFiles;
+        say('Newest-first ordering prepared for ' . count($orderedFiles) . ' filesystem entries.');
+    }
 
     foreach ($iterator as $file) {
         if (!$file->isFile()) {

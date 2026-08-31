@@ -230,6 +230,7 @@ Best speed improvements:
 - Keep clean ZIPs available for paid plugins so repair does not wait on failed WordPress.org downloads.
 - Add large backup/cache folders to `policy/default.json` `skip_relative_prefixes` if you do not want to scan archives on every run.
 - Use `--debug-progress` only for troubleshooting; it prints every file and slows scans.
+- Use `--newest-first` to inspect recently modified files earlier while still completing the full scan. This changes ordering only; malware can forge or backdate timestamps.
 
 ## Notes
 
