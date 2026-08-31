@@ -20,6 +20,7 @@ line(){ echo "==================================================================
 find_warden(){ find "${REPO_ROOT}/scanner" -maxdepth 1 -type f -name 'wp-warden-pef-*.php' -printf '%f\n' 2>/dev/null | sort -V | tail -n 1 | sed "s#^#${REPO_ROOT}/scanner/#"; }
 scanner_version_from_path(){ basename "$1" | sed -nE 's/^wp-warden-(pef|scan-sites)-([0-9]+\.[0-9]+\.[0-9]+)\.(php|sh)$/\2/p'; }
 repo_git(){ (cd "$REPO_ROOT" && git "$@"); }
+fetch_main(){ repo_git fetch "$@" origin main:refs/remotes/origin/main; }
 github_scanner_file(){ repo_git ls-tree -r --name-only origin/main -- scanner 2>/dev/null | grep -E '^scanner/wp-warden-pef-[0-9]+\.[0-9]+\.[0-9]+\.php$' | sort -V | tail -n 1; }
 site_root(){
     local PLATFORM="$1" SITE_ID="$2" ROOT="${3:-}"
@@ -145,7 +146,7 @@ check_updates(){
         echo "  [WARNING] Update check unavailable: ${REPO_ROOT} is not a Git checkout."
         return 0
     fi
-    if ! repo_git fetch --quiet origin main; then
+    if ! fetch_main --quiet; then
         echo "  [WARNING] Update check failed; continuing with installed files."
         return 0
     fi
@@ -201,7 +202,7 @@ self_update(){
         echo "ERROR: Local repository changes detected; nothing was overwritten."
         return 1
     }
-    repo_git fetch origin main || return 1
+    fetch_main || return 1
     repo_git merge --ff-only origin/main || {
         echo "ERROR: Update is not a clean fast-forward; local changes were preserved."
         return 1
