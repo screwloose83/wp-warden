@@ -451,10 +451,11 @@ function load_php_pattern_rules(string $intelDir): array {
     // expressions. Large malware files can embed entire third-party libraries,
     // making hundreds of generic whole-file regex checks unnecessarily slow.
     $priorityIds = [
-        'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001' => 0,
-        'PHP_LEAFMAILER_FAMILY_001' => 1,
-        'PHP_LEAFMAILER_PASSWORD_GATE_001' => 2,
-        'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => 3,
+        'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001' => 0,
+        'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001' => 1,
+        'PHP_LEAFMAILER_FAMILY_001' => 2,
+        'PHP_LEAFMAILER_PASSWORD_GATE_001' => 3,
+        'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => 4,
     ];
     foreach ($rules as $index => &$loadedRule) {
         $loadedRule['_load_order'] = $index;
@@ -4342,6 +4343,7 @@ function trusted_auto_quarantine_rule_ids(): array {
         // external/community rule CRITICAL is intentionally not sufficient.
         'PHP_WPHIDDENBOT_PERSISTENCE_001',
         'PHP_WPHIDDENBOT_HIDE_USER_003',
+        'PHP_INDEXED_STRING_TABLE_GOTO_REMOTE_LOADER_001',
         'PHP_TRIPLE_MD5_POST_GZIP_DROPPER_001',
         'PHP_LEAFMAILER_FAMILY_001',
         'PHP_LEAFMAILER_PASSWORD_GATE_001',
