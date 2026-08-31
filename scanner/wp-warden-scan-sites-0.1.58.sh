@@ -13,10 +13,18 @@ UPDATE_CHECK_INTERVAL="${WP_WARDEN_UPDATE_CHECK_INTERVAL:-21600}"
 RUN_DATE="$(date +%Y-%m-%d)"
 RUN_TIME="$(date +%H%M%S)"
 RUN_LOG_DIR="${LOG_ROOT}/${RUN_DATE}"
+RECENT_PHP_OPTION=""
 mkdir -p "$RUN_LOG_DIR"
 
-usage(){ echo "Usage: $0 domain.com.au | --all | --check-updates | --self-update"; exit 1; }
+usage(){ echo "Usage: $0 [--recent-php-days=N] (domain.com.au | --all) | --check-updates | --self-update"; exit 1; }
 line(){ echo "======================================================================"; }
+scan_scope_label(){
+    if [ -n "$RECENT_PHP_OPTION" ]; then
+        echo "recent PHP quick sweep (${RECENT_PHP_OPTION#*=} day(s); incomplete scan)"
+    else
+        echo "full file scan"
+    fi
+}
 find_warden(){ find "${REPO_ROOT}/scanner" -maxdepth 1 -type f -name 'wp-warden-pef-*.php' -printf '%f\n' 2>/dev/null | sort -V | tail -n 1 | sed "s#^#${REPO_ROOT}/scanner/#"; }
 scanner_version_from_path(){ basename "$1" | sed -nE 's/^wp-warden-(pef|scan-sites)-([0-9]+\.[0-9]+\.[0-9]+)\.(php|sh)$/\2/p'; }
 repo_git(){ (cd "$REPO_ROOT" && git "$@"); }
@@ -418,13 +426,13 @@ scan_site(){
  fi
 
  SITE_LOG="${RUN_LOG_DIR}/${DISPLAY_ID}-${RUN_TIME}.log"; REPORT="${RUN_LOG_DIR}/${DISPLAY_ID}-${RUN_TIME}.json"
- { line; echo " WP-Warden: $DISPLAY_ID"; echo " Started: $(date)"; echo " Platform: $PLATFORM"; echo " Site ID: $SITE_ID"; echo " Domain: ${DOMAIN:-unknown}"; echo " Site: $SITE_ROOT"; echo " Quarantine: $QUARANTINE"; echo " JSON: $REPORT"; line; echo; echo ">>> PASS 1: VERIFY + SCAN + CLEANUP"; } | tee -a "$SITE_LOG"
+ { line; echo " WP-Warden: $DISPLAY_ID"; echo " Started: $(date)"; echo " Platform: $PLATFORM"; echo " Site ID: $SITE_ID"; echo " Domain: ${DOMAIN:-unknown}"; echo " Site: $SITE_ROOT"; echo " Scope: $(scan_scope_label)"; echo " Quarantine: $QUARANTINE"; echo " JSON: $REPORT"; line; echo; echo ">>> PASS 1: VERIFY + SCAN + CLEANUP"; } | tee -a "$SITE_LOG"
  # Extra plugin/theme files are report-only by default. Premium/vendor checksum
  # sets can be incomplete, so their absence is not proof of malware.
- php "$WARDEN" "$SITE_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --quarantine-extra-core-auto --exclude-pdf --newest-first --max-size=1 --max-text-size=1 --quarantine="$QUARANTINE" 2>&1 | tee -a "$SITE_LOG"
+ php "$WARDEN" "$SITE_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --quarantine-extra-core-auto --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --quarantine="$QUARANTINE" 2>&1 | tee -a "$SITE_LOG"
  CLEANUP_EXIT=${PIPESTATUS[0]}
  { echo; echo ">>> PASS 1 EXIT CODE: $CLEANUP_EXIT"; echo ">>> PASS 2: POST-CLEANUP VERIFY (cache enabled, no checksum refetch)"; } | tee -a "$SITE_LOG"
- php "$WARDEN" "$SITE_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first --max-size=1 --max-text-size=1 --vulnerability-scan --report-json="$REPORT" 2>&1 | tee -a "$SITE_LOG"
+ php "$WARDEN" "$SITE_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --vulnerability-scan --report-json="$REPORT" 2>&1 | tee -a "$SITE_LOG"
  VERIFY_EXIT=${PIPESTATUS[0]}
  if [ -s "$REPORT" ] && command -v jq >/dev/null 2>&1; then
    CRITICAL=$(jq -r '.summary.critical // 0' "$REPORT"); HIGH=$(jq -r '.summary.high // 0' "$REPORT"); MEDIUM=$(jq -r '.summary.medium // 0' "$REPORT"); LOW=$(jq -r '.summary.low // 0' "$REPORT"); TOTAL=$(jq -r '.summary.findings_total // 0' "$REPORT")
@@ -539,7 +547,7 @@ scan_all(){
  local PLATFORM SITE_ID SITE_ROOT DOMAIN DISPLAY_ID ENTRY
  local -a CLEAN_SITES=() DIRTY_SITES=() SKIPPED_SITES=() HEALTH_FAILED_SITES=() HEALTH_WARNING_SITES=() SITES=()
  local ALL_LOG="${RUN_LOG_DIR}/all-sites-${RUN_TIME}.log"; exec > >(tee -a "$ALL_LOG") 2>&1
- line; echo " WP-WARDEN - ALL WORDPRESS SITES"; echo " Started: $(date)"; echo " Scanner: $WARDEN"; echo " Discovery: ApisCP + CWP"; echo " Log: $ALL_LOG"; line
+ line; echo " WP-WARDEN - ALL WORDPRESS SITES"; echo " Started: $(date)"; echo " Scanner: $WARDEN"; echo " Discovery: ApisCP + CWP"; echo " Scope: $(scan_scope_label)"; echo " Log: $ALL_LOG"; line
  mapfile -t SITES < <(discover_sites); [ "${#SITES[@]}" -gt 0 ] || { echo "No WordPress installations found."; return 1; }
  echo "Found ${#SITES[@]} WordPress site(s)."
  for ENTRY in "${SITES[@]}"; do
@@ -571,6 +579,20 @@ scan_all(){
  [ "$CLEAN_COUNT" -gt 0 ] && { echo; echo CLEAN:; printf '  [CLEAN] %s\n' "${CLEAN_SITES[@]}"; }; [ "$DIRTY_COUNT" -gt 0 ] && { echo; echo 'NOT CLEAN:'; printf '  [NOT CLEAN] %s\n' "${DIRTY_SITES[@]}"; }; [ "$SKIPPED_COUNT" -gt 0 ] && { echo; echo SKIPPED:; printf '  [SKIPPED] %s\n' "${SKIPPED_SITES[@]}"; }
  echo; echo "Logs: $RUN_LOG_DIR"; line; [ "$DIRTY_COUNT" -gt 0 ] && return 1 || return 0
 }
+
+POSITIONAL=()
+for ARG in "$@"; do
+    case "$ARG" in
+        --recent-php-days=*)
+            RECENT_PHP_DAYS="${ARG#*=}"
+            [[ "$RECENT_PHP_DAYS" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --recent-php-days requires a positive integer"; exit 1; }
+            [ -z "$RECENT_PHP_OPTION" ] || { echo "ERROR: --recent-php-days may only be specified once"; exit 1; }
+            RECENT_PHP_OPTION="--recent-php-days=$RECENT_PHP_DAYS"
+            ;;
+        *) POSITIONAL+=("$ARG") ;;
+    esac
+done
+set -- "${POSITIONAL[@]}"
 
 cleanup_old_logs
 if [ "${1:-}" = "--check-updates" ]; then check_updates 1; exit $?; fi
