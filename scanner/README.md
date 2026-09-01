@@ -51,13 +51,13 @@ The versioned multi-site wrapper checks GitHub for updates at most once every si
 Run a check immediately without scanning a site:
 
 ```bash
-/root/wp-warden/scanner/wp-warden-scan-sites-0.1.58.sh --check-updates
+/root/wp-warden/scanner/wp-warden-scan-sites.sh --check-updates
 ```
 
 Install a clean fast-forward update and copy published intel files into the deployed intel bundle:
 
 ```bash
-/root/wp-warden/scanner/wp-warden-scan-sites-0.1.58.sh --self-update
+/root/wp-warden/scanner/wp-warden-scan-sites.sh --self-update
 ```
 
 The check displays both the installed scanner version/local commit and the newest scanner version/GitHub `main` commit. `--self-update` stops when the Git checkout contains local changes. Intel syncing overwrites published files that changed but preserves local-only files. Override the standard locations with `WP_WARDEN_REPO_ROOT` and `WP_WARDEN_INTEL_ROOT`. Set `WP_WARDEN_UPDATE_CHECK_INTERVAL` to change the default 21,600-second check interval.
@@ -75,7 +75,7 @@ WP Warden detects the confirmed `WP_Core_Integrity <hex>` persistence family tha
 Report-only detection happens during every database-enabled scan. Explicit cleanup requires both apply and quarantine controls:
 
 ```bash
-php wp-warden-pef-0.1.58.php /path/to/wordpress \
+php wp-warden-pef.php /path/to/wordpress \
   --apply \
   --quarantine=/var/lib/wp-warden/quarantine/site \
   --cleanup-database-persistence-auto
@@ -90,7 +90,7 @@ WP Warden audits the WordPress filesystem owner's crontab for confirmed jobs tha
 Report-only cron auditing runs automatically. To back up the complete original crontab and remove only the matching persistence entries:
 
 ```bash
-php wp-warden-pef-0.1.58.php /path/to/wordpress \
+php wp-warden-pef.php /path/to/wordpress \
   --apply \
   --quarantine=/var/lib/wp-warden/quarantine/site \
   --cleanup-malware-cron-auto
