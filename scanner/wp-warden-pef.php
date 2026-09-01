@@ -2814,6 +2814,7 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
         'cache-optimizer-394f' => 'BUILTIN_RANDOMIZED_CACHE_OPTIMIZER_PLUGIN_DIR_001',
         'site-health-cc95459ffe03' => 'BUILTIN_RANDOMIZED_SITE_HEALTH_PLUGIN_DIR_001',
         'wp2s_up_88835050' => 'BUILTIN_WP2S_UP_PLUGIN_DIR_001',
+        'smtpxf609c584' => 'BUILTIN_RANDOMIZED_SMTPX_PLUGIN_DIR_001',
     ] as $slug => $expectedRuleId) {
         $ioc = malicious_plugin_slug_ioc($slug);
         $require(($ioc['rule_id'] ?? null) === $expectedRuleId,
@@ -3534,6 +3535,12 @@ function malicious_plugin_slug_ioc(string $slug): ?array {
         return [
             'rule_id' => 'BUILTIN_WP2S_UP_PLUGIN_DIR_001',
             'family' => 'WP2Shell updater persistence',
+        ];
+    }
+    if (warden_preg_match('/^smtpx[a-f0-9]{8,32}$/i', $slug) === 1) {
+        return [
+            'rule_id' => 'BUILTIN_RANDOMIZED_SMTPX_PLUGIN_DIR_001',
+            'family' => 'randomized SMTPX malware loader',
         ];
     }
 
