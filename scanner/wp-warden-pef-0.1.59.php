@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.58';
+const WP_WARDEN_VERSION = '0.1.59';
 const WP_WARDEN_CACHE_VERSION = '2';
 
 $opts = parse_args($argv);
@@ -3913,14 +3913,23 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
         ], true);
     }
 
-    $size = @filesize($path);
-    if (is_int($size) && $size > ($maxTextSizeMb * 1024 * 1024)) {
-        stats_inc('files_skipped');
-        say("[TEXT-SKIP] Regex scan skipped for large text candidate: $rel (" . round($size / 1048576, 2) . " MB)");
+    // WordPress generated translation catalogs (*.l10n.php) are commonly one very
+    // long PHP line containing a large returned array. Running hundreds of whole-file
+    // PCRE malware signatures against those files can cause pathological regex CPU use.
+    // Keep normal hashing/integrity handling above, but use a token-based safety scan
+    // here instead of the generic regex engine.
+    if (is_wordpress_l10n_php($rel)) {
+        scan_wordpress_l10n_php_safely($path, $rel, $hashes);
     } else {
-        $textData = read_text_candidate($path);
-        if ($textData !== null) {
-            scan_text_rules($path, $rel, $hashes, $intel['php_rules'], $textData);
+        $size = @filesize($path);
+        if (is_int($size) && $size > ($maxTextSizeMb * 1024 * 1024)) {
+            stats_inc('files_skipped');
+            say("[TEXT-SKIP] Regex scan skipped for large text candidate: $rel (" . round($size / 1048576, 2) . " MB)");
+        } else {
+            $textData = read_text_candidate($path);
+            if ($textData !== null) {
+                scan_text_rules($path, $rel, $hashes, $intel['php_rules'], $textData);
+            }
         }
     }
 
@@ -3935,6 +3944,99 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
             'recommended_action' => 'Add local core checksum intel or verify against official package.',
         ]);
     }
+}
+
+function is_wordpress_l10n_php(string $rel): bool {
+    $rel = normalize_relative($rel);
+    return strpos($rel, 'wp-content/languages/') === 0
+        && preg_match('/\.l10n\.php$/i', $rel) === 1;
+}
+
+function scan_wordpress_l10n_php_safely(string $path, string $rel, array $hashes): void {
+    $data = @file_get_contents($path);
+    if (!is_string($data)) {
+        return;
+    }
+
+    // token_get_all() is linear and, unlike the generic PCRE rule set, ignores
+    // dangerous-looking words that merely occur inside translated string literals.
+    $tokens = token_get_all($data);
+    $dangerousVariables = [
+        '$_GET' => true,
+        '$_POST' => true,
+        '$_REQUEST' => true,
+        '$_COOKIE' => true,
+        '$_FILES' => true,
+        '$_SERVER' => true,
+    ];
+    $dangerousFunctions = [
+        'assert' => true,
+        'base64_decode' => true,
+        'call_user_func' => true,
+        'call_user_func_array' => true,
+        'exec' => true,
+        'file_put_contents' => true,
+        'fopen' => true,
+        'fwrite' => true,
+        'gzinflate' => true,
+        'gzuncompress' => true,
+        'passthru' => true,
+        'pcntl_exec' => true,
+        'popen' => true,
+        'proc_open' => true,
+        'shell_exec' => true,
+        'system' => true,
+        'unlink' => true,
+    ];
+    $dangerousTokenIds = array_fill_keys(array_filter([
+        defined('T_EVAL') ? T_EVAL : null,
+        defined('T_INCLUDE') ? T_INCLUDE : null,
+        defined('T_INCLUDE_ONCE') ? T_INCLUDE_ONCE : null,
+        defined('T_REQUIRE') ? T_REQUIRE : null,
+        defined('T_REQUIRE_ONCE') ? T_REQUIRE_ONCE : null,
+    ], static function ($value): bool { return is_int($value); }), true);
+
+    $hits = [];
+    foreach ($tokens as $token) {
+        if (!is_array($token)) {
+            continue;
+        }
+
+        [$tokenId, $tokenText] = $token;
+        if ($tokenId === T_VARIABLE && isset($dangerousVariables[$tokenText])) {
+            $hits[$tokenText] = true;
+            continue;
+        }
+
+        if ($tokenId === T_STRING) {
+            $name = strtolower($tokenText);
+            if (isset($dangerousFunctions[$name])) {
+                $hits[$name . '()'] = true;
+            }
+            continue;
+        }
+
+        if (isset($dangerousTokenIds[$tokenId])) {
+            $hits[strtolower(trim($tokenText))] = true;
+        }
+    }
+
+    if (!$hits) {
+        return;
+    }
+
+    $indicators = array_keys($hits);
+    sort($indicators, SORT_STRING);
+    add_finding([
+        'severity' => 'high',
+        'type' => 'suspicious_l10n_php_code',
+        'rule_id' => 'BUILTIN_L10N_EXECUTABLE_CODE_001',
+        'path' => $path,
+        'relative_path' => $rel,
+        'reason' => 'WordPress .l10n.php translation file contains executable/request-handling tokens that are not expected in a generated translation catalog: ' . implode(', ', $indicators),
+        'hashes' => $hashes,
+        'recommended_action' => 'Compare this translation file with a clean WordPress/plugin language package before replacing or quarantining it.',
+    ], true);
 }
 
 function scan_trusted_known_good_file(string $path, string $rel, array $hashes, array $intel): void {
