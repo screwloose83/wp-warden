@@ -19,7 +19,15 @@ if (isset($opts['help']) || (empty($opts['target']) && !isset($opts['self-test']
     exit(isset($opts['help']) ? 0 : 1);
 }
 
-$intelDir = normalize_path($opts['intel-dir'] ?? __DIR__ . '/../wp-warden-intel');
+$intelDirExplicit = isset($opts['intel-dir']) && is_string($opts['intel-dir']);
+$intelDir = normalize_path($intelDirExplicit ? $opts['intel-dir'] : __DIR__ . '/../wp-warden-intel');
+if (!$intelDirExplicit && !is_dir($intelDir . '/patterns')) {
+    $repositoryIntelDir = normalize_path(__DIR__ . '/../intel');
+    if (is_dir($repositoryIntelDir . '/patterns')) {
+        fwrite(STDERR, "WARN: deployed intel bundle not found at $intelDir; using repository intel: $repositoryIntelDir\n");
+        $intelDir = $repositoryIntelDir;
+    }
+}
 $slowRuleMs = isset($opts['slow-rule-ms']) && ctype_digit((string)$opts['slow-rule-ms'])
     ? (int)$opts['slow-rule-ms'] : 250;
 $slowFileMs = isset($opts['slow-file-ms']) && ctype_digit((string)$opts['slow-file-ms'])
