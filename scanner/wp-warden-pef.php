@@ -4249,7 +4249,12 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
             'recommended_action' => 'Replace from a clean WordPress core package after backup.',
         ]);
         if (is_file($path) && should_offer_repair_after_finding()) {
-            maybe_offer_original_repair('core', null, null, $rel, $path, $expected);
+            if (maybe_offer_original_repair('core', null, null, $rel, $path, $expected)) {
+                // The replacement bytes were verified against the trusted core
+                // checksum before installation. Do not spend time scanning the
+                // newly restored known-good file with generic malware regexes.
+                return;
+            }
         }
     }
 
@@ -4292,7 +4297,11 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
             'recommended_action' => 'Replace from a clean vendor/package copy after backup.',
         ]);
         if (is_file($path) && should_offer_repair_after_finding()) {
-            maybe_offer_original_repair($component['type'], $component['slug'], $component['version'], $rel, $path, $component['expected'], $component['clean_zip'] ?? null);
+            if (maybe_offer_original_repair($component['type'], $component['slug'], $component['version'], $rel, $path, $component['expected'], $component['clean_zip'] ?? null)) {
+                // As above, a successful repair is checksum-proven clean. Failed,
+                // skipped or declined repairs continue through malware scanning.
+                return;
+            }
         }
     }
 
