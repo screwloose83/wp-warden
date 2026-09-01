@@ -19,6 +19,11 @@ root and immediate `var/www/<domain-or-subdomain>` roots containing a
 deduplicated, and document-root symlinks that resolve outside the account's
 `var/www` tree are skipped.
 
+When a wrapper scan finishes with critical or high findings still present, it
+prints a shell-escaped interactive follow-up command. That command enables
+manual repair, quarantine, deletion, and allowlisting choices but does not
+enable broad automatic quarantine of extra plugin or theme files.
+
 ## Quick Start
 
 ```bash

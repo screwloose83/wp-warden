@@ -466,6 +466,33 @@ fleet_ioc_sweep(){
     fi
 }
 
+print_interactive_followup(){
+ local SITE_ROOT="$1" QUARANTINE="$2"
+ local -a CMD=(
+   php "$WARDEN" "$SITE_ROOT"
+   "--intel-dir=$INTEL_ROOT"
+   --verify-all
+   --interactive
+   --apply
+   "--quarantine=$QUARANTINE"
+   --repair-original
+   --prompt-unknown-admins
+   --exclude-pdf
+   --newest-first
+   --max-size=1
+   --max-text-size=1
+   --vulnerability-scan
+ )
+ [ -z "$RECENT_PHP_OPTION" ] || CMD+=("$RECENT_PHP_OPTION")
+
+ echo
+ echo ">>> NEXT STEP: INTERACTIVE REVIEW"
+ echo "Review each remaining finding and choose its action (view/repair/quarantine/delete/allowlist/skip):"
+ printf '  '
+ printf '%q ' "${CMD[@]}"
+ printf '\n'
+}
+
 scan_site(){
  local PLATFORM="$1" SITE_ID="$2" SITE_ROOT="${3:-}" DOMAIN="${4:-}" QUARANTINE SITE_LOG REPORT CLEANUP_EXIT VERIFY_EXIT
  local CRITICAL=0 HIGH=0 MEDIUM=0 LOW=0 TOTAL=0 VULN_COUNT=0 VULN_STATUS=UNKNOWN RESULT_STATUS SITE_START SITE_END DISPLAY_ID
@@ -534,7 +561,7 @@ scan_site(){
  fi
 
  SITE_END=$(date +%s)
- { echo; line; echo " RESULT: ${RESULT_STATUS/_/ }"; echo " Platform: $PLATFORM"; echo " Site ID: $SITE_ID"; echo " Domain: ${DOMAIN:-unknown}"; echo " Critical: $CRITICAL"; echo " High: $HIGH"; echo " Medium: $MEDIUM"; echo " Low: $LOW"; echo " Findings: $TOTAL"; echo " Vulnerabilities: $VULN_COUNT ($VULN_STATUS)"; echo " Site health: $LAST_HEALTH_STATUS (HTTP $LAST_HEALTH_HTTP, $LAST_HEALTH_REASON)"; printf " Runtime: %dm %02ds\n" "$(((SITE_END-SITE_START)/60))" "$(((SITE_END-SITE_START)%60))"; echo " JSON: $REPORT"; line; } | tee -a "$SITE_LOG"
+ { echo; line; echo " RESULT: ${RESULT_STATUS/_/ }"; echo " Platform: $PLATFORM"; echo " Site ID: $SITE_ID"; echo " Domain: ${DOMAIN:-unknown}"; echo " Critical: $CRITICAL"; echo " High: $HIGH"; echo " Medium: $MEDIUM"; echo " Low: $LOW"; echo " Findings: $TOTAL"; echo " Vulnerabilities: $VULN_COUNT ($VULN_STATUS)"; echo " Site health: $LAST_HEALTH_STATUS (HTTP $LAST_HEALTH_HTTP, $LAST_HEALTH_REASON)"; printf " Runtime: %dm %02ds\n" "$(((SITE_END-SITE_START)/60))" "$(((SITE_END-SITE_START)%60))"; echo " JSON: $REPORT"; line; [ "$RESULT_STATUS" = CLEAN ] || print_interactive_followup "$SITE_ROOT" "$QUARANTINE"; } | tee -a "$SITE_LOG"
  write_summary "$DISPLAY_ID" "$RESULT_STATUS" "$CRITICAL" "$HIGH" "$MEDIUM" "$LOW" "$TOTAL" "$VULN_COUNT" "$VULN_STATUS" "$LAST_HEALTH_HTTP" "$LAST_HEALTH_STATUS" "$LAST_HEALTH_DETAIL"
  [ "$RESULT_STATUS" = CLEAN ] && return 0 || return 1
 }
