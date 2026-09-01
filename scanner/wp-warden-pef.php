@@ -1640,6 +1640,13 @@ function is_backup_component_directory(string $slug): bool {
         return true;
     }
 
+    // backup-backup is the published slug of the legitimate Backup Migration
+    // plugin. Malware has been observed inside copies of it, so scan its files
+    // normally instead of hiding it behind the generic "-backup" warning.
+    if (strcasecmp($slug, 'backup-backup') === 0) {
+        return false;
+    }
+
     return warden_preg_match(
         '/(?:[._-](?:old|bak|backup|copy|disabled|orig|original|previous|temp|tmp)|~)$/i',
         $slug
@@ -2801,6 +2808,17 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
         'known clean fixture does not trigger controlled malware rule');
     $require(warden_preg_match($controlled, '<?php eval(base64_decode($x));', $dummy, 0, 0, ['rule_id'=>'SELFTEST_CONTROLLED','path'=>'malicious-fixture.php']) === 1,
         'known malicious fixture triggers controlled malware rule');
+    $require(!is_backup_component_directory('backup-backup'),
+        'legitimate backup-backup plugin slug is not treated as an old backup');
+    foreach ([
+        'cache-optimizer-394f' => 'BUILTIN_RANDOMIZED_CACHE_OPTIMIZER_PLUGIN_DIR_001',
+        'site-health-cc95459ffe03' => 'BUILTIN_RANDOMIZED_SITE_HEALTH_PLUGIN_DIR_001',
+        'wp2s_up_88835050' => 'BUILTIN_WP2S_UP_PLUGIN_DIR_001',
+    ] as $slug => $expectedRuleId) {
+        $ioc = malicious_plugin_slug_ioc($slug);
+        $require(($ioc['rule_id'] ?? null) === $expectedRuleId,
+            "randomized plugin IOC detected: $slug");
+    }
 
     $tmpRoot = rtrim(normalize_path(sys_get_temp_dir()), '/') . '/wp-warden-self-test-' . getmypid() . '-' . bin2hex(random_bytes(4));
     $l10nDir = $tmpRoot . '/wp-content/languages/plugins';
@@ -3498,6 +3516,24 @@ function malicious_plugin_slug_ioc(string $slug): ?array {
         return [
             'rule_id' => 'BUILTIN_GALEX_WEBSHELL_PLUGIN_DIR_001',
             'family' => 'Galex command-webshell',
+        ];
+    }
+    if (warden_preg_match('/^cache-optimizer-[a-f0-9]{4,32}$/i', $slug) === 1) {
+        return [
+            'rule_id' => 'BUILTIN_RANDOMIZED_CACHE_OPTIMIZER_PLUGIN_DIR_001',
+            'family' => 'randomized cache-optimizer persistence',
+        ];
+    }
+    if (warden_preg_match('/^site-health-[a-f0-9]{8,32}$/i', $slug) === 1) {
+        return [
+            'rule_id' => 'BUILTIN_RANDOMIZED_SITE_HEALTH_PLUGIN_DIR_001',
+            'family' => 'randomized site-health persistence',
+        ];
+    }
+    if (warden_preg_match('/^wp2s_up_[a-f0-9]{6,32}$/i', $slug) === 1) {
+        return [
+            'rule_id' => 'BUILTIN_WP2S_UP_PLUGIN_DIR_001',
+            'family' => 'WP2Shell updater persistence',
         ];
     }
 
