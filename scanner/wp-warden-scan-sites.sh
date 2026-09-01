@@ -540,18 +540,45 @@ scan_site(){
 }
 
 discover_sites(){
-    local d ROOT USER DOMAIN
+    local d ROOT USER DOMAIN WWW_ROOT CANON_WWW CANON_ROOT WEB_NAME
+    local -A SEEN_APISCP_ROOTS=()
 
     {
 
-    # ApisCP: /home/virtual/domain.tld/var/www/html
+    # ApisCP: discover the primary var/www/html site plus WordPress installs
+    # in immediate subdomain/addon-domain document roots under var/www.
     if [ -d "$VIRTUAL_ROOT" ]; then
-        find "$VIRTUAL_ROOT" -maxdepth 1 \( -type l -o -type d \) -printf '%f\n' 2>/dev/null | while read -r d; do
+        while IFS= read -r -d '' d; do
+            d="$(basename "$d")"
             [ -z "$d" ] && continue
             case "$d" in site*|admin*|FILESYSTEMTEMPLATE) continue;; esac
-            ROOT="${VIRTUAL_ROOT}/${d}/var/www/html"
-            [ -f "$ROOT/wp-config.php" ] && printf 'apiscp|%s|%s|%s\n' "$d" "$ROOT" "$d"
-        done
+            WWW_ROOT="${VIRTUAL_ROOT}/${d}/var/www"
+            [ -d "$WWW_ROOT" ] || continue
+            CANON_WWW="$(readlink -f -- "$WWW_ROOT" 2>/dev/null || true)"
+            [ -n "$CANON_WWW" ] || continue
+
+            while IFS= read -r -d '' ROOT; do
+                [ -f "$ROOT/wp-config.php" ] || continue
+                CANON_ROOT="$(readlink -f -- "$ROOT" 2>/dev/null || true)"
+                [ -n "$CANON_ROOT" ] || continue
+
+                # Do not let a document-root symlink escape this ApisCP account.
+                case "${CANON_ROOT}/" in
+                    "${CANON_WWW}/"*) ;;
+                    *) echo "WARN: skipping ApisCP web-root symlink outside account: $ROOT -> $CANON_ROOT" >&2; continue;;
+                esac
+
+                # ApisCP may expose one account through several /home/virtual
+                # aliases. Scan each physical WordPress root only once.
+                [ -z "${SEEN_APISCP_ROOTS[$CANON_ROOT]+x}" ] || continue
+                SEEN_APISCP_ROOTS["$CANON_ROOT"]=1
+
+                WEB_NAME="$(basename "$ROOT")"
+                DOMAIN="$WEB_NAME"
+                [ "$WEB_NAME" = "html" ] && DOMAIN="$d"
+                printf 'apiscp|%s|%s|%s\n' "$d" "$ROOT" "$DOMAIN"
+            done < <(find "$WWW_ROOT" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -print0 2>/dev/null)
+        done < <(find "$VIRTUAL_ROOT" -mindepth 1 -maxdepth 1 \( -type l -o -type d \) -print0 2>/dev/null)
     fi
 
     # CWP: /home/username/public_html

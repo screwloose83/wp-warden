@@ -13,6 +13,12 @@ the programs rather than encoded in the command filename.
 
 WP Warden is designed for ApisCP/CWP style multi-server WordPress administration. It favors trusted checksum intel first, then targeted malware heuristics and interactive repair/quarantine actions.
 
+On ApisCP, wrapper discovery checks both the primary `var/www/html` document
+root and immediate `var/www/<domain-or-subdomain>` roots containing a
+`wp-config.php`. Physical roots exposed through multiple ApisCP aliases are
+deduplicated, and document-root symlinks that resolve outside the account's
+`var/www` tree are skipped.
+
 ## Quick Start
 
 ```bash
