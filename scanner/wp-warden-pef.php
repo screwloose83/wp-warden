@@ -1456,14 +1456,24 @@ function load_plugin_checksum_sets(string $wpRoot, string $intelDir, bool $fetch
         $payload = load_component_checksum_payload($local);
         $map = $payload['files'];
         $cleanZip = $payload['clean_zip'];
+        $source = $payload['source'];
 
         // Prefer an exact trusted local clean ZIP over any network lookup.
-        if (!$map) {
-            $exactZip = find_existing_local_clean_zip(local_clean_zip_candidates('plugins', $slug, $version));
-            if ($exactZip) {
+        $exactZip = find_existing_local_clean_zip(local_clean_zip_candidates('plugins', $slug, $version));
+        if ($exactZip) {
+            $exactSha256 = strtolower((string)@hash_file('sha256', $exactZip));
+            $cachedZipSha256 = strtolower((string)($cleanZip['sha256'] ?? ''));
+            $cachedZipPath = normalize_path((string)($cleanZip['path'] ?? ''));
+            if (!$map || $source !== 'local-clean-zip' || $cachedZipSha256 !== $exactSha256 || $cachedZipPath !== normalize_path($exactZip)) {
                 $map = build_component_checksums_from_zip($exactZip, $slug);
                 if ($map) {
-                    $cleanZip = ['path' => $exactZip, 'sha256' => strtolower((string)@hash_file('sha256', $exactZip))];
+                    $source = 'local-clean-zip';
+                    $cleanZip = [
+                        'path' => $exactZip,
+                        'sha256' => $exactSha256,
+                        'source' => 'locally-approved-exact-package',
+                        'acquired_at' => gmdate('c', (int)(@filemtime($exactZip) ?: time())),
+                    ];
                     cache_checksum_file($local, [
                         'schema' => 'wp-warden.checksums.component.v1',
                         'type' => 'plugin',
@@ -1478,6 +1488,35 @@ function load_plugin_checksum_sets(string $wpRoot, string $intelDir, bool $fetch
                         'type' => 'plugin', 'slug' => $slug, 'version' => $version, 'zip' => $exactZip,
                     ];
                     say("Built plugin checksum intel from local clean ZIP: $slug $version (" . count($map) . " files)", true);
+                }
+            }
+        }
+
+        // Migrate older API-only manifests to the exact release package when
+        // network fetching is enabled. This is a one-time conversion because
+        // the rewritten manifest records official-wordpress-zip as its source.
+        if ($map && $fetchOfficial && $source === 'official-wordpress-checksum-api') {
+            $official = official_component_zip('plugin', $slug, $version, $intelDir);
+            if ($official) {
+                $comparison = compare_checksum_maps($map, $official['files']);
+                $map = $official['files'];
+                $source = 'official-wordpress-zip';
+                $cleanZip = [
+                    'path'=>$official['zip'], 'sha256'=>$official['sha256'],
+                    'source'=>'official-wordpress-release-package',
+                    'source_url'=>$official['url'], 'acquired_at'=>gmdate('c'),
+                ];
+                cache_checksum_file($local, [
+                    'schema'=>'wp-warden.checksums.component.v1', 'type'=>'plugin',
+                    'slug'=>$slug, 'version'=>$version, 'source'=>$source,
+                    'created_at'=>gmdate('c'), 'clean_zip'=>$cleanZip,
+                    'upstream_comparison'=>$comparison, 'files'=>$map,
+                ]);
+                if ($comparison['different'] || $comparison['api_only'] || $comparison['zip_only']) {
+                    say(sprintf(
+                        '[SOURCE-MISMATCH] Migrated %s %s from API checksums to exact ZIP: different=%d api-only=%d zip-only=%d',
+                        $slug, $version, $comparison['different'], $comparison['api_only'], $comparison['zip_only']
+                    ), true);
                 }
             }
         }
@@ -1501,6 +1540,7 @@ function load_plugin_checksum_sets(string $wpRoot, string $intelDir, bool $fetch
                     'source' => $source,
                     'created_at' => gmdate('c'),
                     'clean_zip' => $cleanZip,
+                    'upstream_comparison' => $fetched['upstream_comparison'] ?? null,
                     'files' => $map,
                 ]);
                 if ($source === 'official-wordpress-zip') {
@@ -1518,6 +1558,7 @@ function load_plugin_checksum_sets(string $wpRoot, string $intelDir, bool $fetch
                 'version' => $version,
                 'files' => normalize_checksum_map($map),
                 'clean_zip' => $cleanZip,
+                'source' => $source,
             ];
         } else {
             $state['checksum_intel']['missing_plugins'][] = [
@@ -1559,14 +1600,24 @@ function load_theme_checksum_sets(string $wpRoot, string $intelDir, bool $fetchO
         $payload = load_component_checksum_payload($local);
         $map = $payload['files'];
         $cleanZip = $payload['clean_zip'];
+        $source = $payload['source'];
 
         // Exact local clean ZIP is the strongest/cheapest private theme source.
-        if (!$map) {
-            $exactZip = find_existing_local_clean_zip(local_clean_zip_candidates('themes', $slug, $version));
-            if ($exactZip) {
+        $exactZip = find_existing_local_clean_zip(local_clean_zip_candidates('themes', $slug, $version));
+        if ($exactZip) {
+            $exactSha256 = strtolower((string)@hash_file('sha256', $exactZip));
+            $cachedZipSha256 = strtolower((string)($cleanZip['sha256'] ?? ''));
+            $cachedZipPath = normalize_path((string)($cleanZip['path'] ?? ''));
+            if (!$map || $source !== 'local-clean-zip' || $cachedZipSha256 !== $exactSha256 || $cachedZipPath !== normalize_path($exactZip)) {
                 $map = build_component_checksums_from_zip($exactZip, $slug);
                 if ($map) {
-                    $cleanZip = ['path' => $exactZip, 'sha256' => strtolower((string)@hash_file('sha256', $exactZip))];
+                    $source = 'local-clean-zip';
+                    $cleanZip = [
+                        'path' => $exactZip,
+                        'sha256' => $exactSha256,
+                        'source' => 'locally-approved-exact-package',
+                        'acquired_at' => gmdate('c', (int)(@filemtime($exactZip) ?: time())),
+                    ];
                     cache_checksum_file($local, [
                         'schema' => 'wp-warden.checksums.component.v1',
                         'type' => 'theme',
@@ -1621,6 +1672,7 @@ function load_theme_checksum_sets(string $wpRoot, string $intelDir, bool $fetchO
                 'version' => $version,
                 'files' => normalize_checksum_map($map),
                 'clean_zip' => $cleanZip,
+                'source' => $source,
             ];
         } else {
             $state['checksum_intel']['missing_themes'][] = [
@@ -1823,14 +1875,14 @@ function checksum_fetch_clear_failure(string $intelDir, string $type, string $sl
 
 function load_component_checksum_payload(string $path): array {
     if (!is_file($path)) {
-        return ['files' => [], 'clean_zip' => null];
+        return ['files' => [], 'clean_zip' => null, 'source' => null];
     }
     $data = json_file($path);
     $cleanZip = normalize_clean_zip_intel($data['clean_zip'] ?? $data['package_zip'] ?? null);
     if (isset($data['files']) && is_array($data['files'])) {
-        return ['files' => $data['files'], 'clean_zip' => $cleanZip];
+        return ['files' => $data['files'], 'clean_zip' => $cleanZip, 'source' => $data['source'] ?? null];
     }
-    return ['files' => $data, 'clean_zip' => $cleanZip];
+    return ['files' => $data, 'clean_zip' => $cleanZip, 'source' => $data['source'] ?? null];
 }
 
 function normalize_clean_zip_intel($value): ?array {
@@ -1841,6 +1893,9 @@ function normalize_clean_zip_intel($value): ?array {
         return [
             'path' => (string)$value['path'],
             'sha256' => isset($value['sha256']) ? strtolower((string)$value['sha256']) : null,
+            'source' => $value['source'] ?? null,
+            'source_url' => $value['source_url'] ?? null,
+            'acquired_at' => $value['acquired_at'] ?? null,
         ];
     }
     return null;
@@ -1867,7 +1922,32 @@ function fetch_plugin_checksums(string $slug, string $version, string $intelDir)
             }
         }
         say("Fetched official plugin checksums: $slug $version (" . count($map) . " files)");
-        return ['files'=>$map, 'source'=>'official-wordpress-checksum-api', 'clean_zip'=>null];
+        // Use one exact release ZIP as both the verification and repair source.
+        // Comparing the API is still valuable diagnostics, but mixing API
+        // checksums with ZIP/SVN replacement bytes can make valid repairs fail.
+        $official = official_component_zip('plugin', $slug, $version, $intelDir);
+        if ($official) {
+            $comparison = compare_checksum_maps($map, $official['files']);
+            if ($comparison['different'] > 0 || $comparison['api_only'] > 0 || $comparison['zip_only'] > 0) {
+                say(sprintf(
+                    '[SOURCE-MISMATCH] WordPress checksum API and exact ZIP differ for %s %s: different=%d api-only=%d zip-only=%d; using exact ZIP',
+                    $slug, $version, $comparison['different'], $comparison['api_only'], $comparison['zip_only']
+                ), true);
+            }
+            return [
+                'files' => $official['files'],
+                'source' => 'official-wordpress-zip',
+                'clean_zip' => [
+                    'path' => $official['zip'],
+                    'sha256' => $official['sha256'],
+                    'source' => 'official-wordpress-release-package',
+                    'source_url' => $official['url'],
+                    'acquired_at' => gmdate('c'),
+                ],
+                'upstream_comparison' => $comparison,
+            ];
+        }
+        return ['files'=>$map, 'source'=>'official-wordpress-checksum-api', 'clean_zip'=>null, 'upstream_comparison'=>null];
     }
 
     say("WARN: official plugin checksum fetch failed for $slug $version");
@@ -1880,7 +1960,12 @@ function fetch_plugin_checksums(string $slug, string $version, string $intelDir)
         return [
             'files' => $official['files'],
             'source' => 'official-wordpress-zip',
-            'clean_zip' => ['path'=>$official['zip'], 'sha256'=>$official['sha256']],
+            'clean_zip' => [
+                'path'=>$official['zip'], 'sha256'=>$official['sha256'],
+                'source'=>'official-wordpress-release-package',
+                'source_url'=>$official['url'], 'acquired_at'=>gmdate('c'),
+            ],
+            'upstream_comparison' => null,
         ];
     }
 
@@ -1903,7 +1988,11 @@ function fetch_theme_checksums(string $slug, string $version, string $intelDir):
         return [
             'files' => $official['files'],
             'source' => 'official-wordpress-zip',
-            'clean_zip' => ['path'=>$official['zip'], 'sha256'=>$official['sha256']],
+            'clean_zip' => [
+                'path'=>$official['zip'], 'sha256'=>$official['sha256'],
+                'source'=>'official-wordpress-release-package',
+                'source_url'=>$official['url'], 'acquired_at'=>gmdate('c'),
+            ],
         ];
     }
 
@@ -2031,10 +2120,13 @@ function repair_package_info(string $type, ?string $slug, ?string $version, ?arr
         }
 
         return [
+            'type' => $type,
             'label' => "$type $slug $version local clean ZIP",
             'url' => $zipPath,
             'local_path' => $zipPath,
             'clean_zip_sha256' => $cleanZip['sha256'] ?? null,
+            'package_source' => $cleanZip['source'] ?? 'checksum-intel-clean-zip',
+            'source_url' => $cleanZip['source_url'] ?? null,
             'cache_name' => basename($zipPath),
             'zip_prefix' => $type === 'core' ? 'wordpress/' : (($slug ?: '') . '/'),
         ];
@@ -2045,6 +2137,7 @@ function repair_package_info(string $type, ?string $slug, ?string $version, ?arr
             return null;
         }
         return [
+            'type' => 'core',
             'label' => 'WordPress core',
             'url' => "https://wordpress.org/wordpress-$wpVersion.zip",
             'cache_name' => "wordpress-$wpVersion.zip",
@@ -2054,6 +2147,7 @@ function repair_package_info(string $type, ?string $slug, ?string $version, ?arr
 
     if ($type === 'plugin' && $slug && $version) {
         return [
+            'type' => 'plugin',
             'label' => "plugin $slug $version",
             'url' => "https://downloads.wordpress.org/plugin/$slug.$version.zip",
             'alternate_urls' => [
@@ -2068,6 +2162,7 @@ function repair_package_info(string $type, ?string $slug, ?string $version, ?arr
 
     if ($type === 'theme' && $slug && $version) {
         return [
+            'type' => 'theme',
             'label' => "theme $slug $version",
             'url' => "https://downloads.wordpress.org/theme/$slug.$version.zip",
             'alternate_urls' => [
@@ -2132,6 +2227,9 @@ function repair_from_package_impl(array $package, string $relativePath, string $
 
     if (!class_exists('ZipArchive')) {
         say("[REPAIR-FAIL] PHP ZipArchive extension is not available; cannot repair $relativePath", true);
+        if (in_array(($package['type'] ?? ''), ['plugin', 'theme'], true)) {
+            return false;
+        }
         return repair_from_svn_file($package, $relativePath, $absPath, $expected);
     }
 
@@ -2143,6 +2241,9 @@ function repair_from_package_impl(array $package, string $relativePath, string $
             foreach ($package['fallback_local_paths'] as $path) {
                 say("  - $path", true);
             }
+        }
+        if (in_array(($package['type'] ?? ''), ['plugin', 'theme'], true)) {
+            return false;
         }
         return repair_from_svn_file($package, $relativePath, $absPath, $expected);
     }
@@ -2166,6 +2267,10 @@ function repair_from_package_impl(array $package, string $relativePath, string $
         'sha256' => strtolower(hash('sha256', $data)),
     ];
     if (!hash_matches($candidate, $expected)) {
+        if (in_array(($package['type'] ?? ''), ['plugin', 'theme'], true)) {
+            record_upstream_source_mismatch($package, $relativePath, $absPath, $expected, $candidate);
+            return false;
+        }
         say("[REPAIR] Package file checksum did not match intel for $relativePath; trying SVN fallback", true);
         return repair_from_svn_file($package, $relativePath, $absPath, $expected);
     }
@@ -2727,6 +2832,43 @@ function file_cache_is_clean(string $path, string $rel): bool {
     return true;
 }
 
+function record_upstream_source_mismatch(array $package, string $relativePath, string $absPath, array $expected, array $candidate): void {
+    $severity = component_checksum_mismatch_severity($relativePath);
+    say("[SOURCE-MISMATCH] Package bytes disagree with checksum intel; repair skipped: $relativePath", true);
+    add_finding([
+        'severity' => $severity,
+        'type' => 'upstream_source_mismatch',
+        'rule_id' => 'BUILTIN_UPSTREAM_PACKAGE_CHECKSUM_MISMATCH_001',
+        'path' => $absPath,
+        'relative_path' => $relativePath,
+        'package_type' => $package['type'] ?? null,
+        'package_source' => $package['package_source'] ?? $package['url'] ?? null,
+        'package_url' => $package['source_url'] ?? $package['url'] ?? null,
+        'expected' => $expected,
+        'package_file_hashes' => $candidate,
+        'reason' => 'The exact package file does not match the stored checksum source. WP-Warden refused to mix sources or overwrite the installed file.',
+        'file_action' => false,
+        'recommended_action' => 'Refresh checksum intel from the exact approved release ZIP and review upstream packaging differences.',
+    ], false);
+}
+
+function compare_checksum_maps(array $apiMap, array $zipMap): array {
+    $apiMap = normalize_checksum_map($apiMap);
+    $zipMap = normalize_checksum_map($zipMap);
+    $out = ['different'=>0, 'api_only'=>0, 'zip_only'=>0];
+    foreach ($apiMap as $path => $expected) {
+        if (!isset($zipMap[$path])) {
+            $out['api_only']++;
+        } elseif (!hash_matches($zipMap[$path], $expected)) {
+            $out['different']++;
+        }
+    }
+    foreach ($zipMap as $path => $_) {
+        if (!isset($apiMap[$path])) $out['zip_only']++;
+    }
+    return $out;
+}
+
 function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
     global $state, $quiet, $slowRuleMs, $slowFileMs, $scanRuntime, $apply,
            $interactive, $nonInteractive, $quarantineDir, $quarantineMalwareAuto,
@@ -2820,6 +2962,28 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
         $require(($ioc['rule_id'] ?? null) === $expectedRuleId,
             "randomized plugin IOC detected: $slug");
     }
+    $comparison = compare_checksum_maps(
+        ['same.php'=>['sha256'=>str_repeat('a', 64)], 'api-only.pot'=>['md5'=>str_repeat('b', 32)], 'different.php'=>['md5'=>str_repeat('c', 32)]],
+        ['same.php'=>['sha256'=>str_repeat('a', 64)], 'zip-only.txt'=>['md5'=>str_repeat('d', 32)], 'different.php'=>['md5'=>str_repeat('e', 32)]]
+    );
+    $require($comparison === ['different'=>1, 'api_only'=>1, 'zip_only'=>1],
+        'checksum-source comparison distinguishes changed and source-only files');
+    $require(component_checksum_mismatch_severity('languages/example.pot') === 'low'
+        && component_checksum_mismatch_severity('includes/loader.php') === 'high'
+        && component_checksum_mismatch_severity('assets/app.js') === 'high',
+        'generated text mismatches are downgraded while PHP/JS remain significant');
+    $pluginPackage = repair_package_info('plugin', 'example-plugin', '1.2.3');
+    $themePackage = repair_package_info('theme', 'example-theme', '4.5.6');
+    $require(($pluginPackage['type'] ?? null) === 'plugin' && ($themePackage['type'] ?? null) === 'theme',
+        'external repair packages retain their source type for no-mix safety');
+    $provenance = normalize_clean_zip_intel([
+        'path'=>'/approved/package.zip', 'sha256'=>str_repeat('a', 64),
+        'source'=>'vendor-release', 'source_url'=>'https://vendor.invalid/package.zip',
+        'acquired_at'=>'2026-09-02T00:00:00Z',
+    ]);
+    $require(($provenance['source'] ?? null) === 'vendor-release'
+        && ($provenance['source_url'] ?? null) === 'https://vendor.invalid/package.zip',
+        'clean ZIP provenance metadata survives normalization');
 
     $tmpRoot = rtrim(normalize_path(sys_get_temp_dir()), '/') . '/wp-warden-self-test-' . getmypid() . '-' . bin2hex(random_bytes(4));
     $l10nDir = $tmpRoot . '/wp-content/languages/plugins';
@@ -4278,7 +4442,7 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
         }
 
         add_finding([
-            'severity' => $component['type'] === 'plugin' ? 'high' : 'high',
+            'severity' => component_checksum_mismatch_severity($rel),
             'type' => "modified_official_{$component['type']}",
             'component' => $component['slug'],
             'component_version' => $component['version'],
@@ -4287,6 +4451,7 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
             'reason' => ucfirst($component['type']) . ' file hash does not match checksum intel.',
             'hashes' => $hashes,
             'expected' => $component['expected'],
+            'checksum_source' => $component['checksum_source'] ?? null,
             'repair' => [
                 'type' => $component['type'],
                 'slug' => $component['slug'],
@@ -4388,6 +4553,17 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
             'recommended_action' => 'Add local core checksum intel or verify against official package.',
         ]);
     }
+}
+
+function component_checksum_mismatch_severity(string $rel): string {
+    $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
+    // Generated translations and documentation frequently differ between an
+    // API manifest, release ZIP and repository tag. They are non-executable;
+    // PHP and JavaScript retain the normal HIGH mismatch severity.
+    if (in_array($ext, ['pot', 'po', 'mo', 'txt', 'md', 'markdown', 'rst'], true)) {
+        return 'low';
+    }
+    return 'high';
 }
 
 function is_wordpress_l10n_php(string $rel): bool {
@@ -4532,6 +4708,7 @@ function component_expected_checksum(string $rel, array $componentChecksums): ?a
         'version' => $set['version'] ?? null,
         'expected' => $set['files'][$parts['inner']],
         'clean_zip' => $set['clean_zip'] ?? null,
+        'checksum_source' => $set['source'] ?? null,
     ];
 }
 

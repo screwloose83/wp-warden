@@ -234,6 +234,19 @@ Repair currently supports clean ZIPs for:
 - WordPress.org plugin/theme SVN tag file fallback after ZIP sources fail
 - Paid/vendor plugins and themes when checksum intel includes a `clean_zip` entry
 
+For plugins and themes, WP Warden uses one exact release ZIP as the authority
+for both per-file verification and repair whenever that package is available.
+The generated manifest records the ZIP SHA-256, source URL/type, acquisition
+time, and any disagreement with the WordPress.org checksum API. It will not mix
+checksums from one source with repair bytes from another or fall through to SVN
+after an external-package source disagreement.
+
+Generated translation/documentation mismatches such as `.pot`, `.po`, `.mo`,
+and text/readme files are reported at low severity when they differ. PHP and
+JavaScript checksum mismatches remain high severity. A package/checksum conflict
+is reported as `upstream_source_mismatch`, and the installed file is not
+automatically overwritten.
+
 The `wp-warden-intel` helper `admin/add-plugin-zip-checksums.php` can generate paid-plugin checksums and copy the clean vendor ZIP into `clean-zips/plugins/`.
 
 If checksum intel does not include an explicit `clean_zip`, repair also looks for local paid package ZIPs in:
