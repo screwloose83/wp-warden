@@ -14,6 +14,7 @@ RUN_DATE="$(date +%Y-%m-%d)"
 RUN_TIME="$(date +%H%M%S)"
 RUN_LOG_DIR="${LOG_ROOT}/${RUN_DATE}"
 RECENT_PHP_OPTION=""
+RECOVER_MISSING_INTEL="${WP_WARDEN_RECOVER_MISSING_INTEL:-1}"
 mkdir -p "$RUN_LOG_DIR"
 
 usage(){ echo "Usage: $0 [--recent-php-days=N] (domain.com.au | --all) | --check-updates | --self-update"; exit 1; }
@@ -519,6 +520,7 @@ scan_site(){
 
  if [ "${RUNNING_ALL:-0}" -ne 1 ]; then
    fleet_ioc_sweep "$DISPLAY_ID" "$REPORT" "$SITE_LOG"
+   [ -s "$REPORT" ] && trigger_missing_intel_recovery "$REPORT" | tee -a "$SITE_LOG"
  fi
 
  SITE_END=$(date +%s)
@@ -601,6 +603,28 @@ aggregate_health(){
  ' "${reports[@]}" 2>/dev/null | sed $'s/\t/  /g'
 }
 
+trigger_missing_intel_recovery(){
+ local FINDER="${REPO_ROOT}/scanner/wp-find-clean.sh" KIND SLUG VERSION
+ local -a REPORTS=("$@")
+ [ "$RECOVER_MISSING_INTEL" = 1 ] || return 0
+ [ -f "$FINDER" ] || { echo "WARN: missing-intel recovery helper unavailable: $FINDER"; return 0; }
+ command -v jq >/dev/null 2>&1 || { echo "WARN: jq is required for missing-intel recovery"; return 0; }
+ [ "${#REPORTS[@]}" -gt 0 ] || return 0
+
+ while IFS=$'\t' read -r KIND SLUG VERSION; do
+   [ -n "$KIND" ] && [ -n "$SLUG" ] && [ -n "$VERSION" ] || continue
+   echo
+   line
+   echo " MISSING INTEL RECOVERY: ${KIND} ${SLUG} ${VERSION}"
+   line
+   bash "$FINDER" "${KIND,,}" "$SLUG" "$VERSION" --zip || true
+ done < <(jq -rsr '
+   ([ .[] | (.checksum_intel.missing_plugins // [])[] | ["PLUGIN", .slug, .version] ] +
+    [ .[] | (.checksum_intel.missing_themes // [])[] | ["THEME", .slug, .version] ])
+   | unique | .[] | @tsv
+ ' "${REPORTS[@]}" 2>/dev/null)
+}
+
 scan_all(){
  RUNNING_ALL=1
  local START_TIME=$(date +%s) CLEAN_COUNT=0 DIRTY_COUNT=0 SKIPPED_COUNT=0 TOTAL_COUNT=0 SITE_RESULT
@@ -629,6 +653,8 @@ scan_all(){
    esac
  done
  aggregate_health
+ local -a RECOVERY_REPORTS=("${RUN_LOG_DIR}"/*-"${RUN_TIME}".json)
+ [ -e "${RECOVERY_REPORTS[0]:-}" ] && trigger_missing_intel_recovery "${RECOVERY_REPORTS[@]}"
  local END_TIME=$(date +%s) ELAPSED=$((END_TIME-START_TIME)); echo; line; echo " WP-WARDEN ALL-SITE SUMMARY"; line; printf " Sites scanned : %d\n CLEAN         : %d\n NOT CLEAN     : %d\n Skipped       : %d\n" "$TOTAL_COUNT" "$CLEAN_COUNT" "$DIRTY_COUNT" "$SKIPPED_COUNT"; printf " Runtime       : %dh %02dm %02ds\n" "$((ELAPSED/3600))" "$(((ELAPSED%3600)/60))" "$((ELAPSED%60))"
  echo
  echo "SITE HEALTH:"

@@ -22,3 +22,18 @@ php scanner/wp-warden.php /home/site/public_html \
 ```
 
 See `scanner/README.md` and `intel/README.md` for usage and intel package management.
+
+## Missing checksum intel recovery
+
+The multi-site wrapper automatically runs `scanner/wp-find-clean.sh` after a
+scan reports missing plugin or theme checksum intel. The helper compares every
+matching installation under `/home` and stores manifests beneath
+`/root/wp-warden/recovery-candidates`.
+
+When at least four complete copies are byte-for-byte identical, it also creates
+a candidate ZIP beneath `/root/wp-recovered-zips/plugins` or
+`/root/wp-recovered-zips/themes`. Candidate ZIPs are deliberately not promoted
+to trusted intel automatically: consensus does not prove a package is clean.
+
+Set `WP_WARDEN_RECOVER_MISSING_INTEL=0` to disable the trigger, or change the
+minimum with `WP_WARDEN_RECOVERY_MIN_COPIES`.
