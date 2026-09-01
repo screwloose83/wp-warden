@@ -7,16 +7,30 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.59';
-const WP_WARDEN_CACHE_VERSION = '2';
+const WP_WARDEN_VERSION = '0.1.60';
+const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
 @ini_set('pcre.backtrack_limit', '500000');
 @ini_set('pcre.recursion_limit', '500000');
 
-if (isset($opts['help']) || empty($opts['target'])) {
+if (isset($opts['help']) || (empty($opts['target']) && !isset($opts['self-test']))) {
     print_help();
     exit(isset($opts['help']) ? 0 : 1);
+}
+
+$intelDir = normalize_path($opts['intel-dir'] ?? __DIR__ . '/../wp-warden-intel');
+$slowRuleMs = isset($opts['slow-rule-ms']) && ctype_digit((string)$opts['slow-rule-ms'])
+    ? (int)$opts['slow-rule-ms'] : 250;
+$slowFileMs = isset($opts['slow-file-ms']) && ctype_digit((string)$opts['slow-file-ms'])
+    ? (int)$opts['slow-file-ms'] : 1000;
+$scanRuntime = [
+    'pcre_error_paths' => [],
+    'generic_rule_paths' => [],
+];
+
+if (isset($opts['self-test'])) {
+    exit(run_self_test($intelDir, $slowRuleMs));
 }
 
 $target = normalize_path($opts['target']);
@@ -25,7 +39,6 @@ if (!is_dir($target)) {
     exit(1);
 }
 
-$intelDir = normalize_path($opts['intel-dir'] ?? __DIR__ . '/../wp-warden-intel');
 $policyId = $opts['policy'] ?? 'default';
 $siteId = $opts['site-id'] ?? basename($target);
 $reportJson = $opts['report-json'] ?? null;
@@ -124,6 +137,11 @@ $state = [
         'svn_attempts' => 0,
         'svn_failures' => 0,
         'svn_seconds' => 0.0,
+        'pcre_errors' => 0,
+        'slow_rules' => 0,
+        'slow_files' => 0,
+        'slowest_rule' => null,
+        'slowest_file' => null,
     ],
     'db_audit' => [
         'admin_users' => [],
@@ -152,6 +170,9 @@ $state = [
         'cache_hits' => 0,
         'cache_misses' => 0,
         'cache_entries' => 0,
+        'large_files_deep_scan_skipped' => 0,
+        'symlinks_detected' => 0,
+        'file_classifications' => [],
     ],
 ];
 $handledInteractivePaths = [];
@@ -235,7 +256,7 @@ if ($quarantineMalwareAuto !== false) {
     } elseif (!$quarantineDir) {
         say("WARN: --quarantine-malware-auto requires --quarantine=DIR; automatic malware quarantine is disabled", true);
     } else {
-        say("Mode:   auto-quarantine enabled for HIGH/CRITICAL malware findings (strong builtin_malware_heuristic + executable_in_uploads; generic PHP-in-non-PHP findings are report-only)", true);
+        say("Mode:   auto-quarantine enabled only for reviewed built-in/external rule IDs plus executable_in_uploads; other heuristic/community findings are report-only", true);
     if ($quarantineWpContentAuto) { say("Mode:   auto-quarantine enabled for suspicious unexpected wp-content directories", true); }
     }
 }
@@ -267,6 +288,8 @@ say("Auditing wp-config.php persistence...", true);
 audit_wp_config_persistence($wpRoot);
 say("Auditing system cron persistence...", true);
 audit_system_cron_persistence($wpRoot);
+say("Auditing symlinks...", true);
+audit_wordpress_symlinks($wpRoot, $intel);
 say("Scanning files...", true);
 $scanStartedMicro = microtime(true);
 scan_tree($wpRoot, $intel, $coreChecksums, $componentChecksums);
@@ -304,7 +327,7 @@ function print_help(): void {
     echo "  --quarantine=DIR        Quarantine directory for moved files\n";
     echo "  --quarantine-extra-auto Auto-quarantine extra plugin/theme files absent from a complete trusted checksum set; requires --apply and --quarantine\n";
     echo "  --quarantine-extra-core-auto Auto-quarantine files in wp-admin/wp-includes absent from official core checksums; requires --apply and --quarantine\n";
-    echo "  --quarantine-malware-auto Auto-quarantine strong high/critical built-in malware findings and executables/scripts in uploads; generic PHP-in-non-PHP findings remain report-only; requires --apply and --quarantine=DIR\n";
+    echo "  --quarantine-malware-auto Auto-quarantine only explicitly reviewed built-in/external rule IDs and executables/scripts in uploads; requires --apply and --quarantine=DIR\n";
     echo "                          Interactive actions: V preview, R repair, Q quarantine, D delete, A allowlist, S skip\n";
     echo "  --repair-original       Offer to replace mismatched core/plugin/theme files from clean ZIPs\n";
     echo "  --repair-original-auto  Auto-replace mismatched files from clean ZIPs; requires --apply\n";
@@ -319,8 +342,10 @@ function print_help(): void {
     echo "  --verify-all            Report files not matched by core checksum/baseline\n";
     echo "  --fetch-official-checksums\n";
     echo "                          Fetch/cache official WordPress core and wordpress.org plugin checksums\n";
-    echo "  --max-size=MB           Skip files larger than MB (default 10)\n";
+    echo "  --max-size=MB           Skip deep inspection above MB, while retaining metadata, magic, location and checksum checks (default 10)\n";
     echo "  --max-text-size=MB      Skip regex text scan for files larger than MB (default 5)\n";
+    echo "  --slow-rule-ms=N        Report regex rules slower than N milliseconds (default 250; 0 disables notices)\n";
+    echo "  --slow-file-ms=N        Report stages/files slower than N milliseconds (default 1000; 0 disables notices)\n";
     echo "  --file-cache=DIR        Persistent clean-file cache directory (default ../cache)\n";
     echo "  --no-file-cache         Disable persistent clean-file cache and force full scan\n";
     echo "  --exclude-pdf           Skip PDF files entirely (faster, but PDF malware/polyglot checks are disabled)\n";
@@ -331,6 +356,7 @@ function print_help(): void {
     echo "  --debug-progress        Print each file path before scanning it\n";
     echo "  --newest-first          Scan eligible files by modification time, newest first; all files are still scanned\n";
     echo "  --recent-php-days=N     Quick sweep only PHP-like files modified in the last N days; not a replacement for a full scan\n";
+    echo "  --self-test             Test runtime, intel regexes, fixtures, cache and ZIP support without scanning a site\n";
     echo "  --quiet                 Less console output\n";
     echo "  --help                  Show this help\n\n";
     echo "EXAMPLES:\n";
@@ -499,20 +525,15 @@ function prepare_php_pattern_rule(array $rule): ?array {
         $rule['_literal'] = $pattern;
     } else {
         $regex = '~' . str_replace('~', '\\~', $pattern) . '~i';
-        $regexError = null;
-
-        set_error_handler(
-            static function (int $severity, string $message) use (&$regexError): bool {
-                $regexError = $message;
-                return true;
-            }
-        );
-        $check = preg_match($regex, '');
-        restore_error_handler();
+        $compileMatches = null;
+        $check = warden_preg_match($regex, '', $compileMatches, 0, 0, [
+            'rule_id' => (string)($rule['id'] ?? '(unnamed rule)'),
+            'path' => '(intel compile)',
+        ]);
 
         if ($check === false) {
             $ruleId = $rule['id'] ?? '(unnamed rule)';
-            $detail = $regexError ?: preg_last_error_msg();
+            $detail = pcre_error_message(preg_last_error());
             say("[RULE-ERROR] Invalid regex $ruleId: $detail", true);
             say("[RULE-ERROR] Pattern: $pattern", true);
             return null;
@@ -596,7 +617,7 @@ function detect_wp_version(string $root): ?string {
         return null;
     }
     $data = file_get_contents($versionFile);
-    if (preg_match('/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]/', $data, $m)) {
+    if (warden_preg_match('/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]/', $data, $m)) {
         return $m[1];
     }
     return null;
@@ -608,7 +629,7 @@ function detect_wp_locale(string $root): string {
         return 'en_US';
     }
     $data = file_get_contents($config);
-    if (preg_match('/define\s*\(\s*[\'"]WPLANG[\'"]\s*,\s*[\'"]([^\'"]*)[\'"]\s*\)/', $data, $m) && $m[1] !== '') {
+    if (warden_preg_match('/define\s*\(\s*[\'"]WPLANG[\'"]\s*,\s*[\'"]([^\'"]*)[\'"]\s*\)/', $data, $m) && $m[1] !== '') {
         return $m[1];
     }
     return 'en_US';
@@ -668,7 +689,7 @@ function audit_wordpress_admins(string $root, array $intel): void {
     }
 
     $prefix = $config['table_prefix'] ?? 'wp_';
-    if (!preg_match('/^[A-Za-z0-9_]+$/', $prefix)) {
+    if (!warden_preg_match('/^[A-Za-z0-9_]+$/', $prefix)) {
         $state['db_audit']['error'] = 'Unsafe table_prefix in wp-config.php.';
         say("WARN: DB admin audit skipped; unsafe table_prefix", true);
         $db->close();
@@ -803,8 +824,8 @@ function detect_suspicious_admin_user(array $entry): ?array {
     // Observed service-style hidden administrators. This is intentionally
     // review-only until the persistence family is independently confirmed.
     if (
-        preg_match('/^wp_service_[a-f0-9]{4,}$/i', $login)
-        && preg_match('/@service\.localhost$/i', $email)
+        warden_preg_match('/^wp_service_[a-f0-9]{4,}$/i', $login)
+        && warden_preg_match('/@service\.localhost$/i', $email)
     ) {
         return [
             'id' => 'DB_SUSPICIOUS_WP_SERVICE_ADMIN_001',
@@ -828,13 +849,13 @@ function audit_database_persistence(mysqli $db, string $prefix): void {
     if ($res && ($row = $res->fetch_assoc())) {
         $raw = (string)($row['option_value'] ?? '');
         $plugins = [];
-        if (preg_match_all('/s:\d+:"([^"]+\.php)"/', $raw, $m)) {
+        if (warden_preg_match_all('/s:\d+:"([^"]+\.php)"/', $raw, $m)) {
             $plugins = array_values(array_unique($m[1]));
         }
         $state['db_audit']['active_plugins'] = $plugins;
 
         foreach ($plugins as $plugin) {
-            if (preg_match('#(?:^|/)wordpress-cache-optimizer/#i', '/' . ltrim($plugin, '/'))) {
+            if (warden_preg_match('#(?:^|/)wordpress-cache-optimizer/#i', '/' . ltrim($plugin, '/'))) {
                 $finding = [
                     'severity' => 'critical',
                     'type' => 'database_persistence',
@@ -940,7 +961,7 @@ function audit_database_persistence(mysqli $db, string $prefix): void {
             $optionValue = (string)($row['option_value'] ?? '');
             $mainOptionName = str_replace('_site_transient_timeout_', '_site_transient_', $optionName);
             $decoded = base64_decode($optionValue, true);
-            $payloadLooksPhp = is_string($decoded) && preg_match('/<\?(?:php|=|\s)/i', substr($decoded, 0, 4096)) === 1;
+            $payloadLooksPhp = is_string($decoded) && warden_preg_match('/<\?(?:php|=|\s)/i', substr($decoded, 0, 4096)) === 1;
             $confirmedByConfig = in_array($mainOptionName, $confirmedConfigOptions, true);
             if (!$confirmedByConfig && !$payloadLooksPhp) {
                 continue;
@@ -1110,7 +1131,7 @@ function detect_malware_admin_user(array $entry): ?array {
     }
 
     // Strong WP2Shell/W2S IOC domains. This also catches variants such as ngx_.
-    if (preg_match('/@wp2shell\.(?:invalid|local)$/i', $email)) {
+    if (warden_preg_match('/@wp2shell\.(?:invalid|local)$/i', $email)) {
         return [
             'id' => 'BUILTIN_WP2SHELL_ADMIN_DOMAIN_002',
             'severity' => 'critical',
@@ -1119,7 +1140,7 @@ function detect_malware_admin_user(array $entry): ?array {
     }
 
     // Catch the characteristic login family even if the attacker changes email.
-    if (preg_match('/^(?:wp2|w2s)_[a-f0-9]{4,}$/i', $login)) {
+    if (warden_preg_match('/^(?:wp2|w2s)_[a-f0-9]{4,}$/i', $login)) {
         return [
             'id' => 'BUILTIN_WP2SHELL_ADMIN_FAMILY_001',
             'severity' => 'critical',
@@ -1128,7 +1149,7 @@ function detect_malware_admin_user(array $entry): ?array {
     }
 
     // Nx persistence family.
-    if (preg_match('/@nx\.invalid$/i', $email)) {
+    if (warden_preg_match('/@nx\.invalid$/i', $email)) {
         return [
             'id' => 'BUILTIN_NX_ADMIN_EMAIL_001',
             'severity' => 'critical',
@@ -1136,7 +1157,7 @@ function detect_malware_admin_user(array $entry): ?array {
         ];
     }
 
-    if (preg_match('/^nx_[a-f0-9]{6,}$/i', $login)) {
+    if (warden_preg_match('/^nx_[a-f0-9]{6,}$/i', $login)) {
         return [
             'id' => 'BUILTIN_NX_ADMIN_001',
             'severity' => 'critical',
@@ -1283,11 +1304,11 @@ function parse_wp_config_db(string $root): ?array {
     $data = file_get_contents($path);
     $config = [];
     foreach (['DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST'] as $key) {
-        if (preg_match('/define\s*\(\s*[\'"]' . preg_quote($key, '/') . '[\'"]\s*,\s*([\'"])(.*?)\1\s*\)/s', $data, $m)) {
+        if (warden_preg_match('/define\s*\(\s*[\'"]' . preg_quote($key, '/') . '[\'"]\s*,\s*([\'"])(.*?)\1\s*\)/s', $data, $m)) {
             $config[$key] = stripcslashes($m[2]);
         }
     }
-    if (preg_match('/\$table_prefix\s*=\s*([\'"])(.*?)\1\s*;/', $data, $m)) {
+    if (warden_preg_match('/\$table_prefix\s*=\s*([\'"])(.*?)\1\s*;/', $data, $m)) {
         $config['table_prefix'] = stripcslashes($m[2]);
     } else {
         $config['table_prefix'] = 'wp_';
@@ -1316,7 +1337,7 @@ function parse_mysql_host(string $host): array {
         return $out;
     }
 
-    if (preg_match('/^(.+):(\d+)$/', $host, $m)) {
+    if (warden_preg_match('/^(.+):(\d+)$/', $host, $m)) {
         $out['host'] = $m[1];
         $out['port'] = (int)$m[2];
     }
@@ -1611,7 +1632,7 @@ function is_backup_component_directory(string $slug): bool {
         return true;
     }
 
-    return preg_match(
+    return warden_preg_match(
         '/(?:[._-](?:old|bak|backup|copy|disabled|orig|original|previous|temp|tmp)|~)$/i',
         $slug
     ) === 1;
@@ -1745,7 +1766,7 @@ function local_component_versions(string $kind, string $slug, string $installedV
                 '/^' . preg_quote($slug, '/') . '\.([0-9][A-Za-z0-9._+-]*)$/',
                 '/^' . preg_quote($slug, '/') . '-([0-9][A-Za-z0-9._+-]*)$/',
             ] as $rx) {
-                if (preg_match($rx, $base, $m)) {
+                if (warden_preg_match($rx, $base, $m)) {
                     $v = $m[1];
                     if (version_compare($v, $installedVersion, '>')) {
                         $versions[$v] = true;
@@ -1899,7 +1920,7 @@ function detect_plugin_version(string $pluginPath, string $slug): ?string {
         if (!is_string($head)) {
             continue;
         }
-        if (preg_match('/^[ \t\/*#@]*Version:\s*(.+)$/mi', $head, $m)) {
+        if (warden_preg_match('/^[ \t\/*#@]*Version:\s*(.+)$/mi', $head, $m)) {
             return trim($m[1]);
         }
     }
@@ -1907,7 +1928,7 @@ function detect_plugin_version(string $pluginPath, string $slug): ?string {
     $readme = "$pluginPath/readme.txt";
     if (is_file($readme)) {
         $head = @file_get_contents($readme, false, null, 0, 8192);
-        if (is_string($head) && preg_match('/^[ \t]*Stable tag:\s*(.+)$/mi', $head, $m)) {
+        if (is_string($head) && warden_preg_match('/^[ \t]*Stable tag:\s*(.+)$/mi', $head, $m)) {
             $version = trim($m[1]);
             return strtolower($version) === 'trunk' ? null : $version;
         }
@@ -1921,7 +1942,7 @@ function detect_theme_version(string $themePath): ?string {
         return null;
     }
     $head = @file_get_contents($style, false, null, 0, 8192);
-    if (is_string($head) && preg_match('/^[ \t\/*#@]*Version:\s*(.+)$/mi', $head, $m)) {
+    if (is_string($head) && warden_preg_match('/^[ \t\/*#@]*Version:\s*(.+)$/mi', $head, $m)) {
         return trim($m[1]);
     }
     return null;
@@ -1990,7 +2011,7 @@ function repair_package_info(string $type, ?string $slug, ?string $version, ?arr
 
     if ($cleanZip && !empty($cleanZip['path'])) {
         $zipPath = normalize_path((string)$cleanZip['path']);
-        if (!preg_match('#^([A-Za-z]:)?/#', $zipPath)) {
+        if (!warden_preg_match('#^([A-Za-z]:)?/#', $zipPath)) {
             $zipPath = rtrim($intelDir, '/') . '/' . ltrim($zipPath, '/');
         }
 
@@ -2452,11 +2473,11 @@ function parse_md5sum_listing(string $body): array {
         if ($line === '') {
             continue;
         }
-        if (preg_match('/^([0-9a-f]{32})\s+\.(\/.+)$/i', $line, $m)) {
+        if (warden_preg_match('/^([0-9a-f]{32})\s+\.(\/.+)$/i', $line, $m)) {
             $map[ltrim($m[2], './')] = ['md5' => strtolower($m[1])];
             continue;
         }
-        if (preg_match('/^([0-9a-f]{32})\s+(.+)$/i', $line, $m)) {
+        if (warden_preg_match('/^([0-9a-f]{32})\s+(.+)$/i', $line, $m)) {
             $map[ltrim($m[2], './')] = ['md5' => strtolower($m[1])];
         }
     }
@@ -2482,7 +2503,7 @@ function normalize_checksum_map(array $files): array {
 }
 
 function checksum_string($value): ?string {
-    if (is_string($value) && preg_match('/^[a-f0-9]{32,64}$/i', $value)) {
+    if (is_string($value) && warden_preg_match('/^[a-f0-9]{32,64}$/i', $value)) {
         return strtolower($value);
     }
     if (is_array($value)) {
@@ -2575,12 +2596,12 @@ function file_cache_signature_for_path(string $rel, array $context): string {
     }
 
     // Component checksum changes are scoped to the affected plugin/theme only.
-    if (preg_match('#^wp-content/plugins/([^/]+)/#', $rel, $m)) {
+    if (warden_preg_match('#^wp-content/plugins/([^/]+)/#', $rel, $m)) {
         $slug = $m[1];
         $parts['plugin'] = $context['plugins'][$slug] ?? 'no-checksum-intel';
     }
 
-    if (preg_match('#^wp-content/themes/([^/]+)/#', $rel, $m)) {
+    if (warden_preg_match('#^wp-content/themes/([^/]+)/#', $rel, $m)) {
         $slug = $m[1];
         $parts['theme'] = $context['themes'][$slug] ?? 'no-checksum-intel';
     }
@@ -2632,7 +2653,11 @@ function file_cache_stat(string $path): ?array {
 }
 
 function file_cache_is_clean(string $path, string $rel): bool {
-    global $fileCacheEntries, $fileCacheSeen, $fileCacheContext, $fileCacheDirty;
+    global $fileCacheEntries, $fileCacheSeen, $fileCacheContext, $fileCacheDirty, $scanRuntime;
+
+    if (!empty($scanRuntime['global_pcre_error'])) {
+        return false;
+    }
 
     $rel = normalize_relative($rel);
     $fileCacheSeen[$rel] = true;
@@ -2674,6 +2699,145 @@ function file_cache_is_clean(string $path, string $rel): bool {
         }
     }
 
+    // Take a second metadata snapshot before accepting the cache hit. This is
+    // intentionally cheap and prevents a file changing during cache validation
+    // from being silently treated as clean.
+    $verified = file_cache_stat($path);
+    if ($verified === null || !file_metadata_equal($st, $verified)) {
+        unset($fileCacheEntries[$rel]);
+        $fileCacheDirty = true;
+        return false;
+    }
+
+    return true;
+}
+
+function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
+    global $state, $quiet, $slowRuleMs, $slowFileMs, $scanRuntime, $apply,
+           $interactive, $nonInteractive, $quarantineDir, $quarantineMalwareAuto,
+           $handledInteractivePaths;
+
+    $quiet = false;
+    $slowRuleMs = $slowRuleThresholdMs;
+    $slowFileMs = 1000;
+    $apply = false;
+    $interactive = false;
+    $nonInteractive = true;
+    $quarantineDir = null;
+    $quarantineMalwareAuto = false;
+    $handledInteractivePaths = [];
+    $scanRuntime = ['pcre_error_paths' => [], 'generic_rule_paths' => []];
+    $state = [
+        'findings' => [],
+        'actions' => [],
+        'timing' => ['pcre_errors'=>0,'slow_rules'=>0,'slow_files'=>0,'slowest_rule'=>null,'slowest_file'=>null],
+        'summary' => ['findings_total'=>0,'critical'=>0,'high'=>0,'medium'=>0,'low'=>0,'info'=>0,'actions_taken'=>0],
+    ];
+
+    $failures = [];
+    $passes = [];
+    $warnings = [];
+    $require = static function (bool $ok, string $label) use (&$failures, &$passes): void {
+        if ($ok) $passes[] = $label; else $failures[] = $label;
+    };
+
+    $require(version_compare(PHP_VERSION, '7.4.0', '>='), 'PHP >= 7.4');
+    foreach (['json', 'pcre', 'tokenizer', 'hash'] as $extension) {
+        $require(extension_loaded($extension), "PHP extension: $extension");
+    }
+    if (class_exists('ZipArchive')) {
+        $passes[] = 'PHP ZIP support';
+    } else {
+        $warnings[] = 'PHP ZIP support unavailable; scanning works, but ZIP-based repair/package verification is unavailable';
+    }
+
+    // Source checkouts keep the bundled intelligence in ../intel, while
+    // installed hosts conventionally expose it as ../wp-warden-intel.
+    if (!is_dir(rtrim($intelDir, '/') . '/patterns')) {
+        $checkoutIntel = normalize_path(__DIR__ . '/../intel');
+        if (is_dir($checkoutIntel . '/patterns')) {
+            $intelDir = $checkoutIntel;
+        }
+    }
+
+    $jsonFiles = glob(rtrim($intelDir, '/') . '/patterns/*.json') ?: [];
+    $require(count($jsonFiles) > 0, 'intel pattern JSON files found');
+    foreach ($jsonFiles as $jsonPath) {
+        $raw = @file_get_contents($jsonPath);
+        if (is_string($raw)) {
+            $raw = preg_replace('/^\xEF\xBB\xBF/', '', $raw);
+        }
+        $decoded = is_string($raw) ? json_decode($raw, true) : null;
+        $require(is_array($decoded), 'intel JSON parses: ' . basename($jsonPath));
+    }
+
+    $compiled = 0;
+    $invalid = 0;
+    foreach (['php-malware-rules.json', 'community-malware-rules.json'] as $name) {
+        $raw = @file_get_contents(rtrim($intelDir, '/') . '/patterns/' . $name);
+        if (is_string($raw)) {
+            $raw = preg_replace('/^\xEF\xBB\xBF/', '', $raw);
+        }
+        $decoded = is_string($raw) ? json_decode($raw, true) : null;
+        foreach (($decoded['rules'] ?? []) as $rule) {
+            if (!is_array($rule) || !rule_enabled($rule)) continue;
+            $prepared = prepare_php_pattern_rule($rule);
+            if ($prepared === null) $invalid++; else $compiled++;
+        }
+    }
+    $require($compiled > 0 && $invalid === 0, "enabled malware regexes compile ($compiled checked)");
+
+    $controlled = '~\beval\s*\(\s*base64_decode\s*\(~i';
+    $dummy = null;
+    $require(warden_preg_match($controlled, '<?php echo "hello";', $dummy, 0, 0, ['rule_id'=>'SELFTEST_CONTROLLED','path'=>'clean-fixture.php']) === 0,
+        'known clean fixture does not trigger controlled malware rule');
+    $require(warden_preg_match($controlled, '<?php eval(base64_decode($x));', $dummy, 0, 0, ['rule_id'=>'SELFTEST_CONTROLLED','path'=>'malicious-fixture.php']) === 1,
+        'known malicious fixture triggers controlled malware rule');
+
+    $tmpRoot = rtrim(normalize_path(sys_get_temp_dir()), '/') . '/wp-warden-self-test-' . getmypid() . '-' . bin2hex(random_bytes(4));
+    $l10nDir = $tmpRoot . '/wp-content/languages/plugins';
+    $cacheDir = $tmpRoot . '/cache';
+    $require(@mkdir($l10nDir, 0700, true) || is_dir($l10nDir), 'self-test temporary directory');
+    $l10nPath = $l10nDir . '/fixture.l10n.php';
+    $fixture = "<?php\nreturn ['messages'=>['literal'=>'eval(base64_decode(example))']];\n";
+    $require(@file_put_contents($l10nPath, $fixture) === strlen($fixture), 'generated .l10n.php fixture created');
+    $beforeFindings = count($state['findings']);
+    $l10nStarted = microtime(true);
+    scan_text_rules($l10nPath, 'wp-content/languages/plugins/fixture.l10n.php', ['sha256'=>hash('sha256', $fixture)], []);
+    $l10nMs = (microtime(true) - $l10nStarted) * 1000;
+    $require($l10nMs < 1000, 'generated .l10n.php fixture completes quickly');
+    $require(empty($scanRuntime['generic_rule_paths']['wp-content/languages/plugins/fixture.l10n.php']),
+        'generated .l10n.php bypasses generic PCRE rules');
+    $require(count($state['findings']) === $beforeFindings, 'generated .l10n.php string literals are not malware findings');
+
+    $require(@mkdir($cacheDir, 0700, true) || is_dir($cacheDir), 'cache directory can be created');
+    $cacheProbe = $cacheDir . '/probe';
+    $require(@file_put_contents($cacheProbe, 'ok') === 2 && @file_get_contents($cacheProbe) === 'ok', 'cache directory read/write');
+
+    if (is_file($cacheProbe)) @unlink($cacheProbe);
+    if (is_file($l10nPath)) @unlink($l10nPath);
+    if (is_dir($cacheDir)) @rmdir($cacheDir);
+    if (is_dir($l10nDir)) @rmdir($l10nDir);
+    if (is_dir(dirname($l10nDir))) @rmdir(dirname($l10nDir));
+    if (is_dir(dirname(dirname($l10nDir)))) @rmdir(dirname(dirname($l10nDir)));
+    if (is_dir($tmpRoot)) @rmdir($tmpRoot);
+
+    foreach ($passes as $pass) echo "[SELF-TEST PASS] $pass" . PHP_EOL;
+    foreach ($warnings as $warning) echo "[SELF-TEST WARN] $warning" . PHP_EOL;
+    foreach ($failures as $failure) echo "[SELF-TEST FAIL] $failure" . PHP_EOL;
+    echo 'Self-test: ' . ($failures ? 'FAILED' : 'PASSED') . ' (' . count($passes) . ' passed, ' . count($warnings) . ' warning(s), ' . count($failures) . ' failed)' . PHP_EOL;
+    return $failures ? 1 : 0;
+}
+
+function file_metadata_equal(?array $left, ?array $right): bool {
+    if ($left === null || $right === null) {
+        return false;
+    }
+    foreach (['dev', 'ino', 'size', 'mtime', 'ctime'] as $key) {
+        if ((string)($left[$key] ?? '') !== (string)($right[$key] ?? '')) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -2764,8 +2928,8 @@ function save_file_cache(): void {
 function wp_root_owner_account(string $root): ?string {
     // CWP has a stable /home/account/... layout. Prefer it because an infected
     // or manually restored wp-config.php can temporarily have the wrong owner.
-    if (preg_match('#^/home/([^/]+)/#', normalize_path($root) . '/', $match) === 1
-        && preg_match('/^[A-Za-z0-9._-]+$/', $match[1]) === 1
+    if (warden_preg_match('#^/home/([^/]+)/#', normalize_path($root) . '/', $match) === 1
+        && warden_preg_match('/^[A-Za-z0-9._-]+$/', $match[1]) === 1
         && $match[1] !== 'virtual') {
         return $match[1];
     }
@@ -2778,7 +2942,7 @@ function wp_root_owner_account(string $root): ?string {
     if ($ownerId !== false && function_exists('posix_getpwuid')) {
         $record = @posix_getpwuid((int)$ownerId);
         $name = is_array($record) ? (string)($record['name'] ?? '') : '';
-        if (preg_match('/^[A-Za-z0-9._-]+$/', $name) === 1) {
+        if (warden_preg_match('/^[A-Za-z0-9._-]+$/', $name) === 1) {
             return $name;
         }
     }
@@ -2786,9 +2950,115 @@ function wp_root_owner_account(string $root): ?string {
     return null;
 }
 
+function pcre_error_category(int $code): string {
+    $map = [
+        PREG_BACKTRACK_LIMIT_ERROR => 'BACKTRACK_LIMIT',
+        PREG_RECURSION_LIMIT_ERROR => 'RECURSION_LIMIT',
+        PREG_BAD_UTF8_ERROR => 'BAD_UTF8',
+        PREG_BAD_UTF8_OFFSET_ERROR => 'BAD_UTF8_OFFSET',
+        PREG_INTERNAL_ERROR => 'INTERNAL',
+    ];
+    if (defined('PREG_JIT_STACKLIMIT_ERROR')) {
+        $map[PREG_JIT_STACKLIMIT_ERROR] = 'JIT_STACK_LIMIT';
+    }
+    return $map[$code] ?? 'OTHER';
+}
+
+function pcre_error_message(int $code): string {
+    if (function_exists('preg_last_error_msg')) {
+        return preg_last_error_msg();
+    }
+    return pcre_error_category($code);
+}
+
+function record_regex_timing(float $elapsedMs, array $context): void {
+    global $state, $slowRuleMs;
+    $ruleId = (string)($context['rule_id'] ?? '');
+    if ($ruleId === '' || !isset($state['timing'])) {
+        return;
+    }
+    $path = (string)($context['path'] ?? '(no path)');
+    $slowest = $state['timing']['slowest_rule'] ?? null;
+    if (!is_array($slowest) || $elapsedMs > (float)($slowest['milliseconds'] ?? -1)) {
+        $state['timing']['slowest_rule'] = [
+            'milliseconds' => round($elapsedMs, 3),
+            'rule_id' => $ruleId,
+            'path' => $path,
+        ];
+    }
+    if ($slowRuleMs > 0 && $elapsedMs >= $slowRuleMs) {
+        $state['timing']['slow_rules'] = (int)($state['timing']['slow_rules'] ?? 0) + 1;
+        say(sprintf('[SLOW-RULE] %dms %s %s', (int)round($elapsedMs), $ruleId, $path), true);
+    }
+}
+
+function record_slow_stage(float $elapsedMs, string $stage, string $path): void {
+    global $slowFileMs;
+    if ($slowFileMs > 0 && $elapsedMs >= $slowFileMs) {
+        say(sprintf('[SLOW-STAGE] %.2fs %s %s', $elapsedMs / 1000, $stage, $path), true);
+    }
+}
+
+function record_file_timing(float $elapsedMs, string $path): void {
+    global $state, $slowFileMs;
+    $slowest = $state['timing']['slowest_file'] ?? null;
+    if (!is_array($slowest) || $elapsedMs > (float)($slowest['milliseconds'] ?? -1)) {
+        $state['timing']['slowest_file'] = [
+            'milliseconds' => round($elapsedMs, 3),
+            'path' => $path,
+        ];
+    }
+    if ($slowFileMs > 0 && $elapsedMs >= $slowFileMs) {
+        $state['timing']['slow_files'] = (int)($state['timing']['slow_files'] ?? 0) + 1;
+        say(sprintf('[SLOW-FILE] %.2fs %s', $elapsedMs / 1000, $path), true);
+    }
+}
+
+function record_pcre_error(int $code, ?string $warning, array $context): void {
+    global $state, $scanRuntime;
+    $category = pcre_error_category($code);
+    $message = $warning ?: pcre_error_message($code);
+    $ruleId = (string)($context['rule_id'] ?? '(unlabelled regex)');
+    $path = (string)($context['path'] ?? '(no path)');
+    if (isset($state['timing'])) {
+        $state['timing']['pcre_errors'] = (int)($state['timing']['pcre_errors'] ?? 0) + 1;
+    }
+    if ($path === '(intel compile)' || $path === '(no path)') {
+        $scanRuntime['global_pcre_error'] = true;
+    } else {
+        $scanRuntime['pcre_error_paths'][normalize_relative($path)] = true;
+    }
+    say("[PCRE-ERROR] $category $ruleId $path: $message", true);
+}
+
+function warden_preg_match(string $pattern, string $subject, ?array &$matches = null, int $flags = 0, int $offset = 0, array $context = []) {
+    $started = microtime(true);
+    // Avoid installing an error handler for every rule. Two monotonic clock
+    // reads are the only timing overhead on the hot path; PCRE provides the
+    // diagnostic through preg_last_error()/preg_last_error_msg() on failure.
+    $result = @preg_match($pattern, $subject, $matches, $flags, $offset);
+    $elapsedMs = (microtime(true) - $started) * 1000;
+    record_regex_timing($elapsedMs, $context);
+    if ($result === false) {
+        record_pcre_error(preg_last_error(), null, $context);
+    }
+    return $result;
+}
+
+function warden_preg_match_all(string $pattern, string $subject, ?array &$matches = null, int $flags = PREG_PATTERN_ORDER, int $offset = 0, array $context = []) {
+    $started = microtime(true);
+    $result = @preg_match_all($pattern, $subject, $matches, $flags, $offset);
+    $elapsedMs = (microtime(true) - $started) * 1000;
+    record_regex_timing($elapsedMs, $context);
+    if ($result === false) {
+        record_pcre_error(preg_last_error(), null, $context);
+    }
+    return $result;
+}
+
 function malicious_php_recreation_cron(string $line, string $root): ?array {
     $pattern = '#\[\s+-f\s+[' . "'\"" . ']?([^\]\s' . "'\"" . ']+\.php)[' . "'\"" . ']?\s*\]\s*\|\|\s*echo\s+[' . "'\"" . ']?([A-Za-z0-9+/=]{80,})[' . "'\"" . ']?\s*\|\s*(?:/[A-Za-z0-9._/-]+/)?base64\s+(?:-d|--decode)\s*>\s*[' . "'\"" . ']?([^\s;&|' . "'\"" . ']+\.php)#i';
-    if (preg_match($pattern, $line, $match) !== 1) {
+    if (warden_preg_match($pattern, $line, $match) !== 1) {
         return null;
     }
 
@@ -2817,7 +3087,7 @@ function audit_system_cron_persistence(string $root): void {
     // in sibling directories. Audit confirmed PHP-recreation jobs across that
     // account's home tree; retain site-root scope for ApisCP/custom layouts.
     $cronScopeRoot = $root;
-    if (preg_match('#^/home/' . preg_quote($account, '#') . '/#', normalize_path($root) . '/') === 1) {
+    if (warden_preg_match('#^/home/' . preg_quote($account, '#') . '/#', normalize_path($root) . '/') === 1) {
         $cronScopeRoot = '/home/' . $account;
     }
 
@@ -2919,7 +3189,7 @@ function audit_wp_config_persistence(string $root): void {
     }
 
     $blockPattern = '#/\*\s*WP_Core_Integrity\s+([a-f0-9]{6,64})\s*\*/[\s\S]*?/\*\s*End-WP_Core_Integrity\s+\1\s*\*/#i';
-    if (!preg_match_all($blockPattern, $data, $matches) || empty($matches[0])) {
+    if (!warden_preg_match_all($blockPattern, $data, $matches) || empty($matches[0])) {
         return;
     }
 
@@ -2930,12 +3200,12 @@ function audit_wp_config_persistence(string $root): void {
             || stripos($block, 'DB_HOST') === false
             || stripos($block, 'base64_decode') === false
             || stripos($block, 'file_put_contents') === false
-            || !preg_match('/_site_transient_health_[a-f0-9]{6,64}/i', $block, $optionMatch)) {
+            || !warden_preg_match('/_site_transient_health_[a-f0-9]{6,64}/i', $block, $optionMatch)) {
             continue;
         }
 
         $tmpPath = null;
-        if (preg_match("#file_put_contents\\s*\\(\\s*['\"](/tmp/php[a-zA-Z0-9._-]+)['\"]#i", $block, $tmpMatch)) {
+        if (warden_preg_match("#file_put_contents\\s*\\(\\s*['\"](/tmp/php[a-zA-Z0-9._-]+)['\"]#i", $block, $tmpMatch)) {
             $tmpPath = normalize_path($tmpMatch[1]);
             $tmpPaths[] = $tmpPath;
         }
@@ -3005,7 +3275,7 @@ function audit_wp_config_persistence(string $root): void {
 
     foreach (array_unique($tmpPaths) as $tmpPayload) {
         $real = realpath($tmpPayload);
-        if ($real === false || dirname(normalize_path($real)) !== '/tmp' || !preg_match('/^php[a-zA-Z0-9._-]+$/', basename($real))) {
+        if ($real === false || dirname(normalize_path($real)) !== '/tmp' || !warden_preg_match('/^php[a-zA-Z0-9._-]+$/', basename($real))) {
             continue;
         }
         $dest = $qRoot . '/' . basename($real) . '.payload';
@@ -3210,13 +3480,13 @@ function audit_malicious_plugin_directories(string $root): void {
 }
 
 function malicious_plugin_slug_ioc(string $slug): ?array {
-    if (preg_match('/^wp2shell-[a-f0-9]{6,64}$/i', $slug) === 1) {
+    if (warden_preg_match('/^wp2shell-[a-f0-9]{6,64}$/i', $slug) === 1) {
         return [
             'rule_id' => 'BUILTIN_WP2SHELL_PLUGIN_DIR_001',
             'family' => 'WP2Shell',
         ];
     }
-    if (preg_match('/^galex_[a-f0-9]{6,64}$/i', $slug) === 1) {
+    if (warden_preg_match('/^galex_[a-f0-9]{6,64}$/i', $slug) === 1) {
         return [
             'rule_id' => 'BUILTIN_GALEX_WEBSHELL_PLUGIN_DIR_001',
             'family' => 'Galex command-webshell',
@@ -3285,14 +3555,14 @@ function looks_random_wp_content_dir(string $name): bool {
     }
 
     // Strong signal for names such as br19c432, a8d912, xk29f8a.
-    if (preg_match('/^[a-z0-9]+$/i', $name)
-        && preg_match('/[a-z]/i', $name)
-        && preg_match('/[0-9]/', $name)) {
+    if (warden_preg_match('/^[a-z0-9]+$/i', $name)
+        && warden_preg_match('/[a-z]/i', $name)
+        && warden_preg_match('/[0-9]/', $name)) {
         return true;
     }
 
     // Long hex-only directory names are also commonly used by droppers.
-    if ($len >= 8 && preg_match('/^[a-f0-9]+$/i', $name)) {
+    if ($len >= 8 && warden_preg_match('/^[a-f0-9]+$/i', $name)) {
         return true;
     }
 
@@ -3378,7 +3648,7 @@ function looks_like_long_encoded_payload(string $path): bool {
     }
 
     $len = strlen($compact);
-    $base64Chars = preg_match_all('/[A-Za-z0-9+\/=]/', $compact, $m);
+    $base64Chars = warden_preg_match_all('/[A-Za-z0-9+\/=]/', $compact, $m);
     if (!is_int($base64Chars)) {
         return false;
     }
@@ -3390,11 +3660,63 @@ function looks_like_long_encoded_payload(string $path): bool {
 
     // Require a substantial uninterrupted Base64-like run so ordinary text,
     // hashes, JSON, minified JS, etc. do not trip this heuristic easily.
-    return preg_match('/[A-Za-z0-9+\/]{2048,}={0,2}/', $compact) === 1;
+    return warden_preg_match('/[A-Za-z0-9+\/]{2048,}={0,2}/', $compact) === 1;
+}
+
+function classify_scan_file(string $rel): string {
+    $rel = normalize_relative($rel);
+    $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
+    if (is_wordpress_l10n_php($rel)) return 'php-generated-data';
+    if (is_php_like_extension($ext)) return 'php-executable';
+    if (in_array($ext, ['js', 'mjs', 'cjs'], true)) return 'javascript';
+    if (in_array($ext, ['html', 'htm', 'xhtml'], true)) return 'html';
+    if ($ext === 'css') return 'css';
+    if ($ext === 'json') return 'json';
+    if (in_array($ext, ['mo', 'po', 'pot'], true)) return 'gettext/translation';
+    if (in_array($ext, ['zip', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'tar'], true)) return 'archive';
+    if (in_array($ext, ['so', 'dll', 'exe', 'bin', 'dat', 'woff', 'woff2', 'ttf', 'otf', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf'], true)) return 'binary';
+    if (in_array($ext, ['txt', 'md', 'log', 'xml', 'yml', 'yaml', 'ini', 'conf', 'htaccess'], true) || $ext === '') return 'text';
+    return 'text';
+}
+
+function audit_wordpress_symlinks(string $root, array $intel): void {
+    global $state;
+    $rootNorm = normalize_path(realpath($root) ?: $root);
+    try {
+        $directory = new RecursiveDirectoryIterator($rootNorm, FilesystemIterator::SKIP_DOTS);
+        $filter = new RecursiveCallbackFilterIterator($directory, static function ($current) use ($rootNorm, $intel): bool {
+            $rel = normalize_relative(fast_relative_path($rootNorm, $current->getPathname()));
+            if ($current->isLink()) return true;
+            return !($current->isDir() && should_skip_path($rel . '/', $intel));
+        });
+        $iterator = new RecursiveIteratorIterator($filter, RecursiveIteratorIterator::SELF_FIRST);
+        foreach ($iterator as $entry) {
+            if (!$entry->isLink()) continue;
+            $path = normalize_path($entry->getPathname());
+            $rel = normalize_relative(fast_relative_path($rootNorm, $path));
+            $target = @readlink($path);
+            $resolved = @realpath($path);
+            $state['summary']['symlinks_detected'] = (int)($state['summary']['symlinks_detected'] ?? 0) + 1;
+            add_finding([
+                'severity' => 'medium',
+                'type' => 'symlink_in_wordpress_tree',
+                'rule_id' => 'BUILTIN_SYMLINK_IN_WORDPRESS_TREE_001',
+                'path' => $path,
+                'relative_path' => $rel,
+                'symlink_target' => $target === false ? null : $target,
+                'symlink_resolved_target' => $resolved === false ? null : normalize_path($resolved),
+                'reason' => 'Symbolic link found in the WordPress tree; its target was not scanned.',
+                'file_action' => false,
+                'recommended_action' => 'Verify that this link and target are intentional. Scan the target separately if it is trusted and in scope.',
+            ], false);
+        }
+    } catch (UnexpectedValueException $e) {
+        say('WARN: symlink audit could not read part of the WordPress tree: ' . $e->getMessage(), true);
+    }
 }
 
 function scan_tree(string $root, array $intel, array $coreChecksums, array $componentChecksums): void {
-    global $maxSizeMb, $verifyAll, $state, $debugProgress, $fileCacheEnabled, $excludePdf, $newestFirst, $recentPhpDays;
+    global $maxSizeMb, $verifyAll, $state, $debugProgress, $fileCacheEnabled, $excludePdf, $newestFirst, $recentPhpDays, $scanRuntime;
 
     $rootNorm = normalize_path(realpath($root) ?: $root);
     $iterator = make_scan_tree_iterator($rootNorm, $intel);
@@ -3414,6 +3736,9 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
         }
         $rel = normalize_relative(fast_relative_path($rootNorm, $path));
         stats_inc('files_seen');
+        $classification = classify_scan_file($rel);
+        $state['summary']['file_classifications'][$classification] =
+            (int)($state['summary']['file_classifications'][$classification] ?? 0) + 1;
 
         if (($state['summary']['files_seen'] % 1000) === 0) {
             $findingCount = count($state['findings']);
@@ -3430,11 +3755,6 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
         if ($excludePdf && strtolower(pathinfo($rel, PATHINFO_EXTENSION)) === 'pdf') {
             stats_inc('files_skipped');
             if ($debugProgress) { say("Excluded PDF: $rel", true); }
-            continue;
-        }
-
-        if ($maxSizeMb > 0 && $file->getSize() > ($maxSizeMb * 1024 * 1024)) {
-            stats_inc('files_skipped');
             continue;
         }
 
@@ -3472,13 +3792,53 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
         $findingsBefore = count($state['findings']);
         $actionsBefore = count($state['actions']);
 
+        $fileStarted = microtime(true);
+        $metadataBefore = file_cache_stat($path);
         scan_one_file($root, $path, $rel, $intel, $coreChecksums, $componentChecksums, $verifyAll);
+        $metadataAfter = is_file($path) ? file_cache_stat($path) : null;
+        $changedDuringScan = false;
+        if (count($state['actions']) === $actionsBefore
+            && $metadataBefore !== null
+            && ($metadataAfter === null || !file_metadata_equal($metadataBefore, $metadataAfter))) {
+            $changedDuringScan = true;
+            file_cache_forget($rel);
+            say("[RACE] File changed during scan: $rel", true);
+            add_finding([
+                'severity' => 'medium',
+                'type' => 'file_changed_during_scan',
+                'rule_id' => 'BUILTIN_FILE_SCAN_RACE_001',
+                'path' => $path,
+                'relative_path' => $rel,
+                'metadata_before' => $metadataBefore,
+                'metadata_after' => $metadataAfter,
+                'reason' => 'File metadata changed while it was being scanned; the result is not considered clean.',
+                'file_action' => false,
+                'recommended_action' => 'Investigate the writer and rescan the site when file activity has stopped.',
+            ], false);
+
+            // Make one bounded retry when no earlier finding/action complicates
+            // interpretation. The race finding remains and prevents caching.
+            if (is_file($path)
+                && count($state['findings']) === $findingsBefore + 1
+                && count($state['actions']) === $actionsBefore) {
+                $retryBefore = file_cache_stat($path);
+                scan_one_file($root, $path, $rel, $intel, $coreChecksums, $componentChecksums, $verifyAll);
+                $retryAfter = is_file($path) ? file_cache_stat($path) : null;
+                if (!file_metadata_equal($retryBefore, $retryAfter)) {
+                    say("[RACE] File changed again during retry: $rel", true);
+                }
+            }
+        }
+        record_file_timing((microtime(true) - $fileStarted) * 1000, $rel);
 
         // Only cache files that completed with no finding/action at all. Files that
         // were repaired, quarantined, suspicious, or unresolved are rescanned next
         // time. This deliberately favours safety over a larger hit rate.
         if ($fileCacheEnabled
             && is_file($path)
+            && !$changedDuringScan
+            && empty($scanRuntime['global_pcre_error'])
+            && empty($scanRuntime['pcre_error_paths'][$rel])
             && count($state['findings']) === $findingsBefore
             && count($state['actions']) === $actionsBefore) {
             file_cache_mark_clean($path, $rel);
@@ -3489,7 +3849,7 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
 function randomized_protect_uploads_plugin_ioc(string $pluginDir, string $slug): bool {
     // The legitimate plugin uses the protect-uploads slug. This malware family
     // clones it into a random seven-letter directory and adds a hostile php.ini.
-    if (preg_match('/^[a-z]{7}$/i', $slug) !== 1) {
+    if (warden_preg_match('/^[a-z]{7}$/i', $slug) !== 1) {
         return false;
     }
 
@@ -3510,9 +3870,9 @@ function randomized_protect_uploads_plugin_ioc(string $pluginDir, string $slug):
     $isProtectUploads = stripos($mainData, 'Protect Uploads') !== false
         && stripos($mainData, 'Alti_ProtectUploads') !== false
         && stripos($adminData, 'Alti_ProtectUploads_Admin') !== false;
-    $hostileIni = preg_match('/disable_functions\s*=\s*(?:none)?\s*$/im', $iniData) === 1
-        && preg_match('/open_basedir\s*=\s*(?:off)?\s*$/im', $iniData) === 1
-        && preg_match('/shell_exec\s*=\s*on\s*$/im', $iniData) === 1;
+    $hostileIni = warden_preg_match('/disable_functions\s*=\s*(?:none)?\s*$/im', $iniData) === 1
+        && warden_preg_match('/open_basedir\s*=\s*(?:off)?\s*$/im', $iniData) === 1
+        && warden_preg_match('/shell_exec\s*=\s*on\s*$/im', $iniData) === 1;
 
     return $isProtectUploads && $hostileIni;
 }
@@ -3530,8 +3890,8 @@ function audit_malicious_upload_bundle_directories(string $root): void {
 
     foreach ($entries as $name) {
         if ($name === '.' || $name === '..'
-            || preg_match('/^[0-9]{4}$/', $name) === 1
-            || preg_match('/^[a-z0-9]{6,20}$/i', $name) !== 1) {
+            || warden_preg_match('/^[0-9]{4}$/', $name) === 1
+            || warden_preg_match('/^[a-z0-9]{6,20}$/i', $name) !== 1) {
             continue;
         }
 
@@ -3611,19 +3971,19 @@ function inspect_malicious_upload_bundle(string $dir): array {
                 $out['sample'] = $out['sample'] ?: $path;
             }
             if ($base === 'php.ini'
-                && preg_match('/disable_functions\s*=\s*(?:none)?\s*$/im', $data) === 1
-                && preg_match('/open_basedir\s*=\s*(?:off)?\s*$/im', $data) === 1) {
+                && warden_preg_match('/disable_functions\s*=\s*(?:none)?\s*$/im', $data) === 1
+                && warden_preg_match('/open_basedir\s*=\s*(?:off)?\s*$/im', $data) === 1) {
                 $out['hostile_php_ini'] = true;
                 $out['sample'] = $out['sample'] ?: $path;
             }
-            if (preg_match('/\$_GET\s*\[\s*[\'\"]f[\'\"]\s*\][\s\S]{0,400}\$_FILES\s*\[\s*[\'\"]file[\'\"]\s*\]/i', $data) === 1
-                && preg_match('/move_uploaded_file\s*\([\s\S]{0,500}[\'\"]\.\.\/[\'\"]\s*\./i', $data) === 1) {
+            if (warden_preg_match('/\$_GET\s*\[\s*[\'\"]f[\'\"]\s*\][\s\S]{0,400}\$_FILES\s*\[\s*[\'\"]file[\'\"]\s*\]/i', $data) === 1
+                && warden_preg_match('/move_uploaded_file\s*\([\s\S]{0,500}[\'\"]\.\.\/[\'\"]\s*\./i', $data) === 1) {
                 $out['query_parent_uploader'] = true;
                 $out['sample'] = $path;
             }
-            if (preg_match('/[\'\"]gzuncompre[\'\"]\s*\.\s*[\'\"]ss[\'\"]/i', $data) === 1
+            if (warden_preg_match('/[\'\"]gzuncompre[\'\"]\s*\.\s*[\'\"]ss[\'\"]/i', $data) === 1
                 && stripos($data, '__FILE__') !== false
-                && preg_match('/eval\s*\(\s*\$[A-Za-z_][A-Za-z0-9_]*\s*\(/i', $data) === 1) {
+                && warden_preg_match('/eval\s*\(\s*\$[A-Za-z_][A-Za-z0-9_]*\s*\(/i', $data) === 1) {
                 $out['fragmented_self_loader'] = true;
                 $out['sample'] = $path;
             }
@@ -3639,6 +3999,9 @@ function make_scan_tree_iterator(string $rootNorm, array $intel): RecursiveItera
     $directory = new RecursiveDirectoryIterator($rootNorm, FilesystemIterator::SKIP_DOTS);
     $filter = new RecursiveCallbackFilterIterator($directory, function ($current) use ($rootNorm, $intel) {
         $rel = fast_relative_path($rootNorm, $current->getPathname());
+        if ($current->isLink()) {
+            return false;
+        }
         if ($current->isDir() && should_skip_path($rel . '/', $intel)) {
             return false;
         }
@@ -3745,7 +4108,7 @@ function is_benign_index_placeholder(string $path, string $rel): bool {
 
     // Match only the complete known benign placeholder, optionally with a closing
     // PHP tag. Anything before/after it causes the file to be scanned normally.
-    return preg_match(
+    return warden_preg_match(
         '/^<\?php\s*(?:\/\/\s*Silence is golden\.?|\/\*\s*Silence is golden\.?\s*\*\/)\s*(?:\?>)?$/i',
         $trimmed
     ) === 1;
@@ -3763,22 +4126,40 @@ function should_skip_path(string $rel, array $intel): bool {
 }
 
 function is_cwp_login_compromise_filename(string $rel): bool {
-    return preg_match('/^cwp_login_[a-f0-9]{6,32}\.php$/i', basename($rel)) === 1;
+    return warden_preg_match('/^cwp_login_[a-f0-9]{6,32}\.php$/i', basename($rel)) === 1;
 }
 
 function scan_one_file(string $root, string $path, string $rel, array $intel, array $coreChecksums, array $componentChecksums, bool $verifyAll): void {
-    global $maxTextSizeMb;
+    global $maxTextSizeMb, $maxSizeMb, $state;
 
     $hashes = file_hashes($path);
     if (!$hashes) {
         return;
     }
 
+    $rel = normalize_relative($rel);
+    $size = @filesize($path);
+    $deepScanAllowed = !is_int($size) || $maxSizeMb <= 0 || $size <= ($maxSizeMb * 1024 * 1024);
+    if (!$deepScanAllowed) {
+        $state['summary']['large_files_deep_scan_skipped'] =
+            (int)($state['summary']['large_files_deep_scan_skipped'] ?? 0) + 1;
+        say("[LARGE-FILE] Deep scan skipped: $rel", true);
+        add_finding([
+            'severity' => 'info',
+            'type' => 'large_file_deep_scan_skipped',
+            'rule_id' => 'BUILTIN_LARGE_FILE_DEEP_SCAN_SKIPPED_001',
+            'path' => $path,
+            'relative_path' => $rel,
+            'size_bytes' => $size,
+            'classification' => classify_scan_file($rel),
+            'reason' => "File exceeds --max-size={$maxSizeMb}MB. Checksums, location and magic checks continue, but deep content scanning is skipped.",
+            'file_action' => false,
+            'recommended_action' => 'Review large executable or unexpected files manually, or raise --max-size for a controlled rescan.',
+        ], false);
+    }
     if (is_whitelisted($hashes, $intel['file_whitelist'])) {
         return;
     }
-
-    $rel = normalize_relative($rel);
     if (is_cwp_login_compromise_filename($rel)) {
         add_finding([
             'severity' => 'high',
@@ -3918,7 +4299,10 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
     // PCRE malware signatures against those files can cause pathological regex CPU use.
     // Keep normal hashing/integrity handling above, but use a token-based safety scan
     // here instead of the generic regex engine.
-    if (is_wordpress_l10n_php($rel)) {
+    if (!$deepScanAllowed) {
+        // Metadata, checksum, location and magic checks above have completed.
+        // Do not load an arbitrarily large file into memory for deep inspection.
+    } elseif (is_wordpress_l10n_php($rel)) {
         scan_wordpress_l10n_php_safely($path, $rel, $hashes);
     } else {
         $size = @filesize($path);
@@ -3949,7 +4333,7 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
 function is_wordpress_l10n_php(string $rel): bool {
     $rel = normalize_relative($rel);
     return strpos($rel, 'wp-content/languages/') === 0
-        && preg_match('/\.l10n\.php$/i', $rel) === 1;
+        && warden_preg_match('/\.l10n\.php$/i', $rel) === 1;
 }
 
 function scan_wordpress_l10n_php_safely(string $path, string $rel, array $hashes): void {
@@ -4228,6 +4612,15 @@ function is_probably_text(string $path): bool {
 }
 
 function scan_text_rules(string $path, string $rel, array $hashes, array $rules, ?string $data = null): void {
+    global $scanRuntime;
+    $rel = normalize_relative($rel);
+    // Defence in depth: callers normally route these files directly to the
+    // token scanner, but this guard prevents any alternate path from sending a
+    // generated catalog through whole-file malware PCRE rules.
+    if (is_wordpress_l10n_php($rel)) {
+        scan_wordpress_l10n_php_safely($path, $rel, $hashes);
+        return;
+    }
     if ($data === null) {
         $data = @file_get_contents($path);
         if ($data === false) {
@@ -4239,12 +4632,17 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
     // community heuristics. This prevents large malware files containing whole
     // vendor libraries from spending minutes in broad regexes before reaching
     // a decisive signature near the start of the file.
+    $externalFastStarted = microtime(true);
     $fastMatchedRuleIds = scan_fast_trusted_family_rules($path, $rel, $hashes, $rules, $data);
+    $externalStageMs = (microtime(true) - $externalFastStarted) * 1000;
     if (!is_file($path)) {
+        record_slow_stage($externalStageMs, 'external-rules', $rel);
         return;
     }
 
+    $builtinStarted = microtime(true);
     scan_builtin_text_heuristics($path, $rel, $hashes, $data);
+    record_slow_stage((microtime(true) - $builtinStarted) * 1000, 'builtin-heuristics', $rel);
 
     // A built-in automatic quarantine may have moved the file. Do not emit
     // secondary external-rule findings for a file that no longer exists.
@@ -4253,10 +4651,14 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
     }
 
     if (!should_run_external_php_rules($rel, $data)) {
+        record_slow_stage($externalStageMs, 'external-rules', $rel);
         return;
     }
 
+    $scanRuntime['generic_rule_paths'][$rel] = true;
+
     $lines = null;
+    $externalRulesStarted = microtime(true);
 
     foreach ($rules as $rule) {
         if (isset($fastMatchedRuleIds[(string)($rule['id'] ?? '')])) {
@@ -4297,7 +4699,11 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
                     $hit = stripos($line, (string)($rule['_literal'] ?? $pattern)) !== false;
                 } else {
                     $regex = $rule['_regex'] ?? ('~' . str_replace('~', '\\~', $pattern) . '~i');
-                    $hit = @preg_match($regex, $line) === 1;
+                    $ruleMatches = null;
+                    $hit = warden_preg_match($regex, $line, $ruleMatches, 0, 0, [
+                        'rule_id' => (string)($rule['id'] ?? '(unnamed rule)'),
+                        'path' => $rel,
+                    ]) === 1;
                 }
 
                 if ($hit) {
@@ -4312,7 +4718,11 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
             } else {
                 // Regexes were validated and assembled once at intel load time.
                 $regex = $rule['_regex'] ?? ('~' . str_replace('~', '\\~', $pattern) . '~i');
-                $matched = @preg_match($regex, $data) === 1;
+                $ruleMatches = null;
+                $matched = warden_preg_match($regex, $data, $ruleMatches, 0, 0, [
+                    'rule_id' => (string)($rule['id'] ?? '(unnamed rule)'),
+                    'path' => $rel,
+                ]) === 1;
             }
         }
 
@@ -4339,6 +4749,8 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
             }
         }
     }
+    $externalStageMs += (microtime(true) - $externalRulesStarted) * 1000;
+    record_slow_stage($externalStageMs, 'external-rules', $rel);
 }
 
 function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes, array $rules, string $data): array {
@@ -4373,7 +4785,11 @@ function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes
             $matched = stripos($data, (string)($rule['_literal'] ?? $pattern)) !== false;
         } else {
             $regex = $rule['_regex'] ?? ('~' . str_replace('~', '\\~', $pattern) . '~i');
-            $matched = @preg_match($regex, $data) === 1;
+            $ruleMatches = null;
+            $matched = warden_preg_match($regex, $data, $ruleMatches, 0, 0, [
+                'rule_id' => $ruleId,
+                'path' => $rel,
+            ]) === 1;
         }
         if (!$matched) {
             continue;
@@ -4472,13 +4888,15 @@ function scan_builtin_text_heuristics(string $path, string $rel, array $hashes, 
         [
             'id' => 'BUILTIN_COOKIE_STRROT13_BASE64_DROPPER_001',
             'severity' => 'critical',
-            'pattern' => '/\$_COOKIE[\s\S]{0,1200}base64_decode\s*\(\s*str_rot13\s*\([\s\S]{0,1200}(tempnam|fopen|fputs|require_once)/i',
+            'anchors' => ['$_COOKIE', 'base64_decode', 'str_rot13'],
+            'pattern' => '/\$_COOKIE.{0,1200}base64_decode\s*\(\s*str_rot13\s*\(.{0,1200}(tempnam|fopen|fputs|require_once)/is',
             'reason' => 'Cookie-supplied payload is str_rot13/base64 decoded, written to a temp file, and loaded.',
         ],
         [
             'id' => 'BUILTIN_AUTOLOAD_TEMP_REQUIRE_001',
             'severity' => 'critical',
-            'pattern' => '/spl_autoload_register\s*\([\s\S]{0,1500}tempnam\s*\([\s\S]{0,1500}require_once\s*\(/i',
+            'anchors' => ['spl_autoload_register', 'tempnam', 'require_once'],
+            'pattern' => '/spl_autoload_register\s*\(.{0,1500}tempnam\s*\(.{0,1500}require_once\s*\(/is',
             'reason' => 'Autoload callback writes or loads a temporary PHP payload.',
         ],
         [
@@ -4496,13 +4914,15 @@ function scan_builtin_text_heuristics(string $path, string $rel, array $hashes, 
         [
             'id' => 'BUILTIN_WP_TIMESTOMP_SELF_DELETE_001',
             'severity' => 'critical',
-            'pattern' => '/(?=[\s\S]*filemtime\s*\([\s\S]{0,200}index\.php)(?=[\s\S]*\btouch\s*\()(?=[\s\S]*updateFileDates\s*\()(?=[\s\S]*(wp-content\/themes|wp-content\/plugins))(?=[\s\S]*STATUS\|OK)(?=[\s\S]*unlink\s*\(\s*__FILE__\s*\))/i',
+            'anchors' => ['filemtime', 'index.php', 'touch', 'updateFileDates', 'wp-content/', 'STATUS|OK', 'unlink', '__FILE__'],
+            'pattern' => '/filemtime\s*\(.{0,200}index\.php|unlink\s*\(\s*__FILE__\s*\)/is',
             'reason' => 'Self-deleting WordPress timestomper resets plugin/theme file dates to hide recently changed files.',
         ],
         [
             'id' => 'BUILTIN_GALEX_REQUEST_COMMAND_SHELL_001',
             'severity' => 'critical',
-            'pattern' => '/(?=[\s\S]*\$_REQUEST\s*\[\s*[\'\"]px[\'\"]\s*\])(?=[\s\S]*\$_REQUEST\s*\[\s*[\'\"](?:b|c)[\'\"]\s*\])(?=[\s\S]*(?:system|passthru|exec|shell_exec|popen)\s*\()(?=[\s\S]*\[S\])(?=[\s\S]*\[E\])/i',
+            'anchors' => ['$_REQUEST', '[S]', '[E]'],
+            'pattern' => '/(?=.*\$_REQUEST\s*\[\s*[\'\"]px[\'\"]\s*\])(?=.*\$_REQUEST\s*\[\s*[\'\"](?:b|c)[\'\"]\s*\])(?=.*(?:system|passthru|exec|shell_exec|popen)\s*\()/is',
             'reason' => 'Request-key-gated command shell executes attacker-supplied commands and wraps output in [S]/[E] markers.',
         ],
     ];
@@ -4511,7 +4931,16 @@ function scan_builtin_text_heuristics(string $path, string $rel, array $hashes, 
         if (!empty($rule['requires_php_or_execution_context']) && !$hasPhpOpenTag && !$hasExecutionContext && !$isPhpLike) {
             continue;
         }
-        if (@preg_match($rule['pattern'], $data)) {
+        foreach (($rule['anchors'] ?? []) as $anchor) {
+            if (stripos($data, $anchor) === false) {
+                continue 2;
+            }
+        }
+        $builtinMatches = null;
+        if (warden_preg_match($rule['pattern'], $data, $builtinMatches, 0, 0, [
+            'rule_id' => $rule['id'],
+            'path' => $rel,
+        ]) === 1) {
             add_finding([
                 'severity' => $rule['severity'],
                 'type' => 'builtin_malware_heuristic',
@@ -4533,7 +4962,7 @@ function scan_builtin_text_heuristics(string $path, string $rel, array $hashes, 
 }
 
 function has_php_open_tag(string $data): bool {
-    return strpos($data, '<?') !== false && preg_match('/<\?(php|=|\s)/i', $data) === 1;
+    return strpos($data, '<?') !== false && warden_preg_match('/<\?(php|=|\s)/i', $data) === 1;
 }
 
 function has_php_only_execution_marker(string $data): bool {
@@ -4697,6 +5126,21 @@ function trusted_auto_quarantine_rule_ids(): array {
     ];
 }
 
+function trusted_builtin_auto_quarantine_rule_ids(): array {
+    return [
+        // Locally reviewed, high-confidence execution/persistence signatures.
+        // New builtin_malware_heuristic rules are report-only until explicitly
+        // reviewed and added here.
+        'BUILTIN_OPENSSL_DECRYPT_EVAL_001',
+        'BUILTIN_EVAL_VARIABLE_001',
+        'BUILTIN_EVAL_BASE64_PAYLOAD_001',
+        'BUILTIN_COOKIE_STRROT13_BASE64_DROPPER_001',
+        'BUILTIN_AUTOLOAD_TEMP_REQUIRE_001',
+        'BUILTIN_WP_TIMESTOMP_SELF_DELETE_001',
+        'BUILTIN_GALEX_REQUEST_COMMAND_SHELL_001',
+    ];
+}
+
 function maybe_auto_quarantine_malware_finding(array $finding): bool {
     global $apply, $quarantineDir, $quarantineMalwareAuto;
 
@@ -4744,7 +5188,8 @@ function maybe_auto_quarantine_malware_finding(array $finding): bool {
 
     if ($type === 'builtin_malware_heuristic'
         && $ruleId === 'BUILTIN_GALEX_REQUEST_COMMAND_SHELL_001'
-        && preg_match('#^wp-content/plugins/[^/]+/#', normalize_relative((string)($finding['relative_path'] ?? ''))) === 1) {
+        && in_array($ruleId, trusted_builtin_auto_quarantine_rule_ids(), true)
+        && warden_preg_match('#^wp-content/plugins/[^/]+/#', normalize_relative((string)($finding['relative_path'] ?? ''))) === 1) {
         $finding['id'] = finding_id($finding);
         say(
             "[AUTO-QUARANTINE-GALEX-SHELL] {$finding['relative_path']} " .
@@ -4800,10 +5245,11 @@ function maybe_auto_quarantine_malware_finding(array $finding): bool {
      * README examples legitimately contain PHP snippets. Stronger built-in
      * execution heuristics are emitted separately and remain eligible here.
      */
-    if (!in_array($type, [
-        'builtin_malware_heuristic',
-        'executable_in_uploads',
-    ], true)) {
+    if ($type === 'builtin_malware_heuristic'
+        && !in_array($ruleId, trusted_builtin_auto_quarantine_rule_ids(), true)) {
+        return false;
+    }
+    if (!in_array($type, ['builtin_malware_heuristic', 'executable_in_uploads'], true)) {
         return false;
     }
 
@@ -4824,7 +5270,7 @@ function trusted_rule_should_quarantine_plugin_directory(array $finding): bool {
     }
 
     $rel = normalize_relative((string)($finding['relative_path'] ?? ''));
-    return preg_match('#^wp-content/plugins/[^/]+/#', $rel) === 1;
+    return warden_preg_match('#^wp-content/plugins/[^/]+/#', $rel) === 1;
 }
 
 function quarantine_upload_bundle_directory_for_finding(array $finding): bool {
@@ -4832,8 +5278,8 @@ function quarantine_upload_bundle_directory_for_finding(array $finding): bool {
 
     $rel = normalize_relative((string)($finding['relative_path'] ?? ''));
     $dir = normalize_path((string)($finding['directory_path'] ?? ''));
-    if (preg_match('#^wp-content/uploads/([a-z0-9]{6,20})/$#i', $rel, $m) !== 1
-        || preg_match('/^[0-9]{4}$/', $m[1]) === 1
+    if (warden_preg_match('#^wp-content/uploads/([a-z0-9]{6,20})/$#i', $rel, $m) !== 1
+        || warden_preg_match('/^[0-9]{4}$/', $m[1]) === 1
         || !is_dir($dir) || is_link($dir)) {
         return false;
     }
@@ -4883,7 +5329,7 @@ function quarantine_plugin_directory_for_finding(array $finding): bool {
         return false;
     }
 
-    if (!preg_match('#^(wp-content/plugins/([^/]+))/#', $relFile, $m)) {
+    if (!warden_preg_match('#^(wp-content/plugins/([^/]+))/#', $relFile, $m)) {
         return false;
     }
 
@@ -5230,7 +5676,7 @@ function normalize_relative(string $path): string {
 }
 
 function looks_like_core_path(string $rel): bool {
-    if (preg_match('#^(wp-admin/|wp-includes/)#', $rel)) {
+    if (warden_preg_match('#^(wp-admin/|wp-includes/)#', $rel)) {
         return true;
     }
     return in_array($rel, [
@@ -6337,7 +6783,7 @@ function detect_auto_update_config(string $wpRoot): array {
     $path=$wpRoot.'/wp-config.php'; $s=is_file($path)?@file_get_contents($path):false;
     if (!is_string($s)) return $cfg;
     foreach (array_keys($cfg) as $name) {
-        if (preg_match('/define\s*\(\s*[\'\"]'.preg_quote($name,'/').'[\'\"]\s*,\s*([^\)]+)\)/i',$s,$m)) $cfg[$name]=trim($m[1]);
+        if (warden_preg_match('/define\s*\(\s*[\'\"]'.preg_quote($name,'/').'[\'\"]\s*,\s*([^\)]+)\)/i',$s,$m)) $cfg[$name]=trim($m[1]);
     }
     return $cfg;
 }
@@ -6365,6 +6811,8 @@ function print_human_report(array $report, ?string $jsonPath): void {
     echo "Scanned:      {$summary['files_scanned']}" . PHP_EOL;
     echo "Skipped:      {$summary['files_skipped']}" . PHP_EOL;
     echo "Benign index: " . ($summary['benign_index_skipped'] ?? 0) . " placeholder(s) skipped" . PHP_EOL;
+    echo "Large files:  " . (int)($summary['large_files_deep_scan_skipped'] ?? 0) . " deep scan(s) skipped" . PHP_EOL;
+    echo "Symlinks:     " . (int)($summary['symlinks_detected'] ?? 0) . " reported, targets not followed" . PHP_EOL;
     $cacheHits = (int)($summary['cache_hits'] ?? 0);
     $cacheMisses = (int)($summary['cache_misses'] ?? 0);
     $cacheTotal = $cacheHits + $cacheMisses;
@@ -6458,9 +6906,31 @@ function print_human_report(array $report, ?string $jsonPath): void {
         echo PHP_EOL;
     }
     if (!empty($report['timing'])) {
+        $timing = $report['timing'];
+        $slowestRule = $timing['slowest_rule'] ?? null;
+        $slowestFile = $timing['slowest_file'] ?? null;
+        echo "Performance:" . PHP_EOL;
+        echo "  File scan seconds: " . ($timing['file_scan_seconds'] ?? 0) . PHP_EOL;
+        echo "  Cache hits: " . (int)($summary['cache_hits'] ?? 0) . PHP_EOL;
+        echo "  Cache misses: " . (int)($summary['cache_misses'] ?? 0) . PHP_EOL;
+        echo "  PCRE errors: " . (int)($timing['pcre_errors'] ?? 0) . PHP_EOL;
+        echo "  Slow rules: " . (int)($timing['slow_rules'] ?? 0) . PHP_EOL;
+        echo "  Slow files: " . (int)($timing['slow_files'] ?? 0) . PHP_EOL;
+        echo "  Slowest rule: " . (is_array($slowestRule)
+            ? sprintf('%.2fms %s %s', (float)$slowestRule['milliseconds'], $slowestRule['rule_id'], $slowestRule['path'])
+            : 'n/a') . PHP_EOL;
+        echo "  Slowest file: " . (is_array($slowestFile)
+            ? sprintf('%.2fms %s', (float)$slowestFile['milliseconds'], $slowestFile['path'])
+            : 'n/a') . PHP_EOL;
+        echo PHP_EOL;
+
         echo "Timing:" . PHP_EOL;
         foreach ($report['timing'] as $k=>$v) {
-            $isCount = preg_match('/(?:_requests|_failures|_attempts)$/', (string)$k) === 1;
+            if (is_array($v) || $v === null) {
+                echo "  $k: " . ($v === null ? 'n/a' : json_encode($v, JSON_UNESCAPED_SLASHES)) . PHP_EOL;
+                continue;
+            }
+            $isCount = warden_preg_match('/(?:_requests|_failures|_attempts|pcre_errors|slow_rules|slow_files)$/', (string)$k) === 1;
             echo "  $k: {$v}" . ($isCount ? '' : 's') . PHP_EOL;
         }
         echo PHP_EOL;

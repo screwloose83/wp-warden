@@ -15,6 +15,41 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
+## Scanner diagnostics and self-test (v0.1.60)
+
+The scanner reports PCRE failures as errors rather than treating them as clean
+no-matches. Slow diagnostics are opt-in by threshold (the defaults only print
+unusually expensive work):
+
+```bash
+php wp-warden-pef.php /home/site/public_html \
+  --slow-rule-ms=250 \
+  --slow-file-ms=1000
+```
+
+`--slow-rule-ms=0` disables slow-rule notices and `--slow-file-ms=0` disables
+slow-stage/file notices. The final Performance section includes PCRE error and
+slow-event counts plus the slowest rule and file.
+
+Run installation/intelligence checks without opening or modifying a WordPress
+site:
+
+```bash
+php wp-warden-pef.php --self-test
+```
+
+The self-test checks PHP capabilities, intel JSON and regex compilation, clean
+and malicious fixtures, the generated `.l10n.php` safety route, cache-directory
+I/O, and ZIP availability. Missing optional ZIP support is reported as a warning;
+test failures return a non-zero status.
+
+Large files still receive hashing, checksum, location, and magic checks. Files
+over `--max-size` get an explicit `large_file_deep_scan_skipped` finding instead
+of disappearing silently. Symlinks in the WordPress tree are reported and their
+targets are not followed. Automatic malware quarantine now permits only reviewed
+built-in/external rule IDs (plus the existing executable-in-uploads behavior);
+new built-in rules remain report-only until explicitly reviewed.
+
 ## WordPress Admin User Audit
 
 WP Warden reads `wp-config.php`, connects to the WordPress database, and lists administrator users in the human report.
