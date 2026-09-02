@@ -3045,6 +3045,21 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
         'external repair packages retain their source type for no-mix safety');
     $require(!in_array('BUILTIN_EVAL_VARIABLE_001', trusted_builtin_auto_quarantine_rule_ids(), true),
         'generic eval-variable heuristic remains report-only');
+    foreach ([
+        'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
+        'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
+    ] as $siteblockRuleId) {
+        $require(in_array($siteblockRuleId, trusted_auto_quarantine_rule_ids(), true)
+            && trusted_rule_should_quarantine_plugin_directory([
+                'rule_id' => $siteblockRuleId,
+                'relative_path' => 'wp-content/plugins/siteblock/loader.php',
+            ])
+            && !trusted_rule_should_quarantine_plugin_directory([
+                'rule_id' => $siteblockRuleId,
+                'relative_path' => 'wp-content/uploads/loader.php',
+            ]),
+            "Siteblock trusted rule quarantines only its containing plugin directory: $siteblockRuleId");
+    }
     $provenance = normalize_clean_zip_intel([
         'path'=>'/approved/package.zip', 'sha256'=>str_repeat('a', 64),
         'source'=>'vendor-release', 'source_url'=>'https://vendor.invalid/package.zip',
@@ -5103,6 +5118,8 @@ function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes
         'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => true,
         'PHP_WP_SYSTEMATIZATION_GOVERNMENT_HIDDEN_PLUGIN_001' => true,
         'PHP_COOKIE_INDEXED_HEX2BIN_INCLUDE_LOADER_001' => true,
+        'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001' => true,
+        'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001' => true,
     ];
     $matchedIds = [];
 
@@ -5465,6 +5482,8 @@ function trusted_auto_quarantine_rule_ids(): array {
         'PHP_LEAFMAILER_PASSWORD_GATE_001',
         'PHP_WP_SYSTEMATIZATION_GOVERNMENT_HIDDEN_PLUGIN_001',
         'PHP_COOKIE_INDEXED_HEX2BIN_INCLUDE_LOADER_001',
+        'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
+        'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
     ];
 }
 
@@ -5609,6 +5628,8 @@ function trusted_rule_should_quarantine_plugin_directory(array $finding): bool {
     if (!in_array($ruleId, [
         'PHP_WPHIDDENBOT_PERSISTENCE_001',
         'PHP_WPHIDDENBOT_HIDE_USER_003',
+        'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
+        'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
     ], true)) {
         return false;
     }
