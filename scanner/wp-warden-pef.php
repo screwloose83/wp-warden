@@ -2256,6 +2256,14 @@ function repair_from_package_impl(array $package, string $relativePath, string $
     }
 
     $data = $zip->getFromName($zipInnerPath);
+    if ($data === false && in_array(($package['type'] ?? ''), ['plugin', 'theme'], true)) {
+        $resolved = resolve_component_zip_entry_by_checksum($zip, $relativePath, $expected);
+        if ($resolved !== null) {
+            $zipInnerPath = $resolved['path'];
+            $data = $resolved['data'];
+            say("[REPAIR] Resolved clean package path: $zipInnerPath", true);
+        }
+    }
     $zip->close();
     if ($data === false) {
         say("[REPAIR-FAIL] Clean package does not contain $zipInnerPath", true);
@@ -2299,6 +2307,65 @@ function repair_from_package_impl(array $package, string $relativePath, string $
     $state['summary']['actions_taken']++;
     say("[REPAIRED] $relativePath from {$package['label']}", true);
     return true;
+}
+
+function resolve_component_zip_entry_by_checksum(ZipArchive $zip, string $relativePath, array $expected): ?array {
+    $componentPath = component_relative_path($relativePath);
+    if ($componentPath === null || $componentPath === '') {
+        return null;
+    }
+
+    $suffix = '/' . $componentPath;
+    $matches = [];
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $name = ltrim(str_replace('\\', '/', (string)$zip->getNameIndex($i)), '/');
+        if ($name === '' || substr($name, -1) === '/' || strpos($name, "\0") !== false) {
+            continue;
+        }
+        if ($name !== $componentPath && substr($name, -strlen($suffix)) !== $suffix) {
+            continue;
+        }
+
+        // Reject traversal-style archive names even though this code reads the
+        // entry into memory rather than extracting it directly.
+        foreach (explode('/', $name) as $part) {
+            if ($part === '..') {
+                continue 2;
+            }
+        }
+
+        $data = $zip->getFromIndex($i);
+        if (!is_string($data)) {
+            continue;
+        }
+        $candidate = [
+            'md5' => strtolower(hash('md5', $data)),
+            'sha256' => strtolower(hash('sha256', $data)),
+        ];
+        if (hash_matches($candidate, $expected)) {
+            $matches[] = ['path' => $name, 'data' => $data];
+        }
+    }
+
+    if (!$matches) {
+        return null;
+    }
+    usort($matches, static function (array $a, array $b): int {
+        $lengthOrder = strlen($a['path']) <=> strlen($b['path']);
+        return $lengthOrder !== 0 ? $lengthOrder : strcmp($a['path'], $b['path']);
+    });
+    return $matches[0];
+}
+
+function component_relative_path(string $relativePath): ?string {
+    foreach (['wp-content/plugins/', 'wp-content/themes/'] as $prefix) {
+        if (strpos($relativePath, $prefix) !== 0) {
+            continue;
+        }
+        $parts = explode('/', substr($relativePath, strlen($prefix)), 2);
+        return isset($parts[1]) && $parts[1] !== '' ? $parts[1] : null;
+    }
+    return null;
 }
 
 function repair_from_svn_file(array $package, string $relativePath, string $absPath, array $expected): bool {
@@ -3005,8 +3072,40 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
     $cacheProbe = $cacheDir . '/probe';
     $require(@file_put_contents($cacheProbe, 'ok') === 2 && @file_get_contents($cacheProbe) === 'ok', 'cache directory read/write');
 
+    $zipProbePath = $tmpRoot . '/alternate-root.zip';
+    if (class_exists('ZipArchive')) {
+        $zipProbe = new ZipArchive();
+        $zipCreated = $zipProbe->open($zipProbePath, ZipArchive::CREATE | ZipArchive::OVERWRITE) === true;
+        if ($zipCreated) {
+            $zipCreated = $zipProbe->addFromString('vendor-archive-root/includes/example.php', 'trusted-package-bytes');
+            $zipProbe->close();
+        }
+        $resolved = null;
+        $rejected = null;
+        $zipProbe = new ZipArchive();
+        if ($zipCreated && $zipProbe->open($zipProbePath) === true) {
+            $resolved = resolve_component_zip_entry_by_checksum(
+                $zipProbe,
+                'wp-content/plugins/installed-slug/includes/example.php',
+                ['sha256' => hash('sha256', 'trusted-package-bytes')]
+            );
+            $rejected = resolve_component_zip_entry_by_checksum(
+                $zipProbe,
+                'wp-content/plugins/installed-slug/includes/example.php',
+                ['sha256' => hash('sha256', 'different-bytes')]
+            );
+            $zipProbe->close();
+        }
+        $require(($resolved['path'] ?? null) === 'vendor-archive-root/includes/example.php'
+            && ($resolved['data'] ?? null) === 'trusted-package-bytes',
+            'component repair resolves an alternate ZIP root by trusted checksum');
+        $require($rejected === null,
+            'component repair rejects alternate-root ZIP bytes with the wrong checksum');
+    }
+
     if (is_file($cacheProbe)) @unlink($cacheProbe);
     if (is_file($l10nPath)) @unlink($l10nPath);
+    if (is_file($zipProbePath)) @unlink($zipProbePath);
     if (is_dir($cacheDir)) @rmdir($cacheDir);
     if (is_dir($l10nDir)) @rmdir($l10nDir);
     if (is_dir(dirname($l10nDir))) @rmdir(dirname($l10nDir));
