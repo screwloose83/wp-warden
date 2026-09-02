@@ -719,7 +719,10 @@ scan_all(){
  aggregate_health
  local -a RECOVERY_REPORTS=("${RUN_LOG_DIR}"/*-"${RUN_TIME}".json)
  [ -e "${RECOVERY_REPORTS[0]:-}" ] && trigger_missing_intel_recovery "${RECOVERY_REPORTS[@]}"
- local END_TIME=$(date +%s) ELAPSED=$((END_TIME-START_TIME)); echo; line; echo " WP-WARDEN ALL-SITE SUMMARY"; line; printf " Sites scanned : %d\n CLEAN         : %d\n NOT CLEAN     : %d\n Skipped       : %d\n" "$TOTAL_COUNT" "$CLEAN_COUNT" "$DIRTY_COUNT" "$SKIPPED_COUNT"; printf " Runtime       : %dh %02dm %02ds\n" "$((ELAPSED/3600))" "$(((ELAPSED%3600)/60))" "$((ELAPSED%60))"
+ local END_TIME ELAPSED
+ END_TIME=$(date +%s)
+ ELAPSED=$((END_TIME-START_TIME))
+ echo; line; echo " WP-WARDEN ALL-SITE SUMMARY"; line; printf " Sites scanned : %d\n CLEAN         : %d\n NOT CLEAN     : %d\n Skipped       : %d\n" "$TOTAL_COUNT" "$CLEAN_COUNT" "$DIRTY_COUNT" "$SKIPPED_COUNT"; printf " Runtime       : %dh %02dm %02ds\n" "$((ELAPSED/3600))" "$(((ELAPSED%3600)/60))" "$((ELAPSED%60))"
  echo
  echo "SITE HEALTH:"
  printf " Healthy       : %d\n" "$HEALTHY_COUNT"
