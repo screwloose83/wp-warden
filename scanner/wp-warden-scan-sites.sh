@@ -280,6 +280,10 @@ self_update(){
     [ -d "${REPO_ROOT}/.git" ] || { echo "ERROR: ${REPO_ROOT} is not a Git checkout"; return 1; }
     repo_git diff --quiet && repo_git diff --cached --quiet || {
         echo "ERROR: Local repository changes detected; nothing was overwritten."
+        echo "Blocking tracked/staged paths (Git status columns are index/worktree):"
+        repo_git status --short --untracked-files=no | sed 's/^/  /'
+        echo "Legend: M=modified, A=added, D=deleted, R=renamed, U=unmerged"
+        echo "Review these changes from: ${REPO_ROOT}"
         return 1
     }
     fetch_main || return 1
