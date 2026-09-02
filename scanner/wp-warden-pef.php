@@ -5000,6 +5000,8 @@ function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes
         'PHP_LEAFMAILER_FAMILY_001' => true,
         'PHP_LEAFMAILER_PASSWORD_GATE_001' => true,
         'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => true,
+        'PHP_WP_SYSTEMATIZATION_GOVERNMENT_HIDDEN_PLUGIN_001' => true,
+        'PHP_COOKIE_INDEXED_HEX2BIN_INCLUDE_LOADER_001' => true,
     ];
     $matchedIds = [];
 
