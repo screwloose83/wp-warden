@@ -3043,6 +3043,8 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
     $themePackage = repair_package_info('theme', 'example-theme', '4.5.6');
     $require(($pluginPackage['type'] ?? null) === 'plugin' && ($themePackage['type'] ?? null) === 'theme',
         'external repair packages retain their source type for no-mix safety');
+    $require(!in_array('BUILTIN_EVAL_VARIABLE_001', trusted_builtin_auto_quarantine_rule_ids(), true),
+        'generic eval-variable heuristic remains report-only');
     $provenance = normalize_clean_zip_intel([
         'path'=>'/approved/package.zip', 'sha256'=>str_repeat('a', 64),
         'source'=>'vendor-release', 'source_url'=>'https://vendor.invalid/package.zip',
@@ -5472,7 +5474,9 @@ function trusted_builtin_auto_quarantine_rule_ids(): array {
         // New builtin_malware_heuristic rules are report-only until explicitly
         // reviewed and added here.
         'BUILTIN_OPENSSL_DECRYPT_EVAL_001',
-        'BUILTIN_EVAL_VARIABLE_001',
+        // BUILTIN_EVAL_VARIABLE_001 intentionally remains report-only. Some
+        // legitimate plugins generate constrained class declarations with
+        // eval($code), so that broad signal is unsafe for unattended action.
         'BUILTIN_EVAL_BASE64_PAYLOAD_001',
         'BUILTIN_COOKIE_STRROT13_BASE64_DROPPER_001',
         'BUILTIN_AUTOLOAD_TEMP_REQUIRE_001',
