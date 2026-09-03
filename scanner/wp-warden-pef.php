@@ -3046,6 +3046,14 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
     $require(!in_array('BUILTIN_EVAL_VARIABLE_001', trusted_builtin_auto_quarantine_rule_ids(), true),
         'generic eval-variable heuristic remains report-only');
     foreach ([
+        'BUILTIN_UNAUTH_COMMAND_FILE_MANAGER_WEBSHELL_001',
+        'BUILTIN_SITEGUARD_HIDDEN_PLUGIN_LOADER_001',
+        'BUILTIN_CUSTOM_ALPHABET_FAKE_IMAGE_EVAL_001',
+    ] as $reviewedBuiltinRuleId) {
+        $require(in_array($reviewedBuiltinRuleId, trusted_builtin_auto_quarantine_rule_ids(), true),
+            "reviewed malware rule is trusted for automatic quarantine: $reviewedBuiltinRuleId");
+    }
+    foreach ([
         'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
     ] as $siteblockRuleId) {
@@ -5282,6 +5290,27 @@ function scan_builtin_text_heuristics(string $path, string $rel, array $hashes, 
             'pattern' => '/(?=.*\$_REQUEST\s*\[\s*[\'\"]px[\'\"]\s*\])(?=.*\$_REQUEST\s*\[\s*[\'\"](?:b|c)[\'\"]\s*\])(?=.*(?:system|passthru|exec|shell_exec|popen)\s*\()/is',
             'reason' => 'Request-key-gated command shell executes attacker-supplied commands and wraps output in [S]/[E] markers.',
         ],
+        [
+            'id' => 'BUILTIN_UNAUTH_COMMAND_FILE_MANAGER_WEBSHELL_001',
+            'severity' => 'critical',
+            'anchors' => ['RecursiveIteratorIterator', 'move_uploaded_file', 'shell_exec', 'chmod'],
+            'pattern' => '/(?=.*\$_POST\s*\[\s*[\'\"]cmd[\'\"]\s*\])(?=.*(?:passthru|system|exec|shell_exec)\s*\(\s*\$[A-Za-z_][A-Za-z0-9_]*\s*\))(?=.*move_uploaded_file\s*\()(?=.*RecursiveIteratorIterator\s*\()(?=.*chmod\s*\()/is',
+            'reason' => 'Unauthenticated command console and file manager supports command execution, upload, recursive deletion, and permission changes.',
+        ],
+        [
+            'id' => 'BUILTIN_SITEGUARD_HIDDEN_PLUGIN_LOADER_001',
+            'severity' => 'critical',
+            'anchors' => ['Plugin Name: Siteguard', 'ypyfara.php', 'gujejaj.php'],
+            'pattern' => '/(?=.*Plugin\s+Name\s*:\s*Siteguard)(?=.*ypy[\'\"]?\s*\.\s*[\'\"]?fara)(?=.*guj[\'\"]?\s*\.\s*[\'\"]?ejaj)/is',
+            'reason' => 'Known fake Siteguard plugin loads randomly named concealed companion files.',
+        ],
+        [
+            'id' => 'BUILTIN_CUSTOM_ALPHABET_FAKE_IMAGE_EVAL_001',
+            'severity' => 'critical',
+            'anchors' => ['strtr', 'base64_decode', 'file_get_contents', '@eval'],
+            'pattern' => '/(?=.*strtr\s*\()(?=.*base64_decode\s*\()(?=.*file_get_contents\s*\()(?=.*substr\s*\([^,]+,\s*3\s*\))(?=.*@eval\s*\()/is',
+            'reason' => 'Payload loader remaps a custom Base64 alphabet, strips a fake three-byte image header, and evaluates the decoded content.',
+        ],
     ];
 
     foreach ($heuristics as $rule) {
@@ -5501,6 +5530,9 @@ function trusted_builtin_auto_quarantine_rule_ids(): array {
         'BUILTIN_AUTOLOAD_TEMP_REQUIRE_001',
         'BUILTIN_WP_TIMESTOMP_SELF_DELETE_001',
         'BUILTIN_GALEX_REQUEST_COMMAND_SHELL_001',
+        'BUILTIN_UNAUTH_COMMAND_FILE_MANAGER_WEBSHELL_001',
+        'BUILTIN_SITEGUARD_HIDDEN_PLUGIN_LOADER_001',
+        'BUILTIN_CUSTOM_ALPHABET_FAKE_IMAGE_EVAL_001',
     ];
 }
 
@@ -5556,6 +5588,22 @@ function maybe_auto_quarantine_malware_finding(array $finding): bool {
         $finding['id'] = finding_id($finding);
         say(
             "[AUTO-QUARANTINE-GALEX-SHELL] {$finding['relative_path']} " .
+            "[$ruleId] - quarantining containing plugin directory",
+            true
+        );
+        return quarantine_plugin_directory_for_finding($finding);
+    }
+
+    if ($type === 'builtin_malware_heuristic'
+        && in_array($ruleId, [
+            'BUILTIN_SITEGUARD_HIDDEN_PLUGIN_LOADER_001',
+            'BUILTIN_CUSTOM_ALPHABET_FAKE_IMAGE_EVAL_001',
+        ], true)
+        && in_array($ruleId, trusted_builtin_auto_quarantine_rule_ids(), true)
+        && warden_preg_match('#^wp-content/plugins/[^/]+/#', normalize_relative((string)($finding['relative_path'] ?? ''))) === 1) {
+        $finding['id'] = finding_id($finding);
+        say(
+            "[AUTO-QUARANTINE-SITEGUARD] {$finding['relative_path']} " .
             "[$ruleId] - quarantining containing plugin directory",
             true
         );
