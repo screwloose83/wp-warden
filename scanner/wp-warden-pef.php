@@ -4360,7 +4360,14 @@ function make_scan_tree_iterator(string $rootNorm, array $intel): RecursiveItera
         }
         return true;
     });
-    return new RecursiveIteratorIterator($filter);
+    // A reviewed whole-plugin quarantine can remove a directory after the
+    // iterator has queued it. Continue past that vanished/unreadable child
+    // instead of terminating the entire scan with UnexpectedValueException.
+    return new RecursiveIteratorIterator(
+        $filter,
+        RecursiveIteratorIterator::LEAVES_ONLY,
+        RecursiveIteratorIterator::CATCH_GET_CHILD
+    );
 }
 
 function newest_first_scan_iterable(RecursiveIteratorIterator $iterator, string $rootNorm, array $intel, ?int $recentPhpDays): Generator {
