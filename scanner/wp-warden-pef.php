@@ -3053,6 +3053,8 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
         $require(in_array($reviewedBuiltinRuleId, trusted_builtin_auto_quarantine_rule_ids(), true),
             "reviewed malware rule is trusted for automatic quarantine: $reviewedBuiltinRuleId");
     }
+    $require(in_array('PHP_PWDYT_GOTO_STRREV_REMOTE_EVAL_001', trusted_auto_quarantine_rule_ids(), true),
+        'reviewed pwdyt remote-eval loader rule is trusted for automatic file quarantine');
     foreach ([
         'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
@@ -5149,6 +5151,7 @@ function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes
         'PHP_COOKIE_INDEXED_HEX2BIN_INCLUDE_LOADER_001' => true,
         'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001' => true,
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001' => true,
+        'PHP_PWDYT_GOTO_STRREV_REMOTE_EVAL_001' => true,
     ];
     $matchedIds = [];
 
@@ -5548,6 +5551,7 @@ function trusted_auto_quarantine_rule_ids(): array {
         'PHP_COOKIE_INDEXED_HEX2BIN_INCLUDE_LOADER_001',
         'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
+        'PHP_PWDYT_GOTO_STRREV_REMOTE_EVAL_001',
     ];
 }
 
