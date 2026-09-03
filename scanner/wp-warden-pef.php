@@ -3068,6 +3068,20 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
             ]),
             "Siteblock trusted rule quarantines only its containing plugin directory: $siteblockRuleId");
     }
+    foreach ([
+        'BUILTIN_SITEGUARD_HIDDEN_PLUGIN_LOADER_001',
+        'BUILTIN_CUSTOM_ALPHABET_FAKE_IMAGE_EVAL_001',
+    ] as $siteguardRuleId) {
+        $require(trusted_rule_should_quarantine_plugin_directory([
+                'rule_id' => $siteguardRuleId,
+                'relative_path' => 'wp-content/plugins/siteguard/loader.php',
+            ])
+            && !trusted_rule_should_quarantine_plugin_directory([
+                'rule_id' => $siteguardRuleId,
+                'relative_path' => 'wp-content/uploads/loader.php',
+            ]),
+            "Siteguard interactive plugin action is confined to a plugin directory: $siteguardRuleId");
+    }
     $provenance = normalize_clean_zip_intel([
         'path'=>'/approved/package.zip', 'sha256'=>str_repeat('a', 64),
         'source'=>'vendor-release', 'source_url'=>'https://vendor.invalid/package.zip',
@@ -5438,6 +5452,7 @@ function maybe_interactive_action(array $finding, bool $quarantineCandidate): vo
         $handledInteractivePaths[$pathKey] = true;
     }
     $canRepair = !empty($finding['repair']) && is_array($finding['repair']);
+    $canQuarantinePlugin = $quarantineDir && trusted_rule_should_quarantine_plugin_directory($finding);
 
     while (true) {
         echo PHP_EOL;
@@ -5451,6 +5466,9 @@ function maybe_interactive_action(array $finding, bool $quarantineCandidate): vo
         if ($quarantineDir) {
             echo "  Q = quarantine/move file" . PHP_EOL;
         }
+        if ($canQuarantinePlugin) {
+            echo "  P = quarantine/remove entire containing plugin" . PHP_EOL;
+        }
         echo "  D = delete permanently" . PHP_EOL;
         echo "  A = allowlist this file hash for this site" . PHP_EOL;
         echo "  S = skip/leave as-is" . PHP_EOL;
@@ -5460,6 +5478,9 @@ function maybe_interactive_action(array $finding, bool $quarantineCandidate): vo
         }
         if ($quarantineDir) {
             echo "/Q";
+        }
+        if ($canQuarantinePlugin) {
+            echo "/P";
         }
         echo "/D/A/S]: ";
 
@@ -5476,6 +5497,13 @@ function maybe_interactive_action(array $finding, bool $quarantineCandidate): vo
         if ($choice === 'Q' && $quarantineDir) {
             quarantine_file($finding);
             return;
+        }
+        if ($choice === 'P' && $canQuarantinePlugin) {
+            if (quarantine_plugin_directory_for_finding($finding)) {
+                return;
+            }
+            echo "Whole-plugin quarantine failed; review the error above and retry or choose another action." . PHP_EOL;
+            continue;
         }
         if ($choice === 'D') {
             delete_finding_file($finding);
@@ -5678,6 +5706,8 @@ function trusted_rule_should_quarantine_plugin_directory(array $finding): bool {
         'PHP_WPHIDDENBOT_HIDE_USER_003',
         'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
+        'BUILTIN_SITEGUARD_HIDDEN_PLUGIN_LOADER_001',
+        'BUILTIN_CUSTOM_ALPHABET_FAKE_IMAGE_EVAL_001',
     ], true)) {
         return false;
     }
