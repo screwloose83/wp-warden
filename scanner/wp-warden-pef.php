@@ -4921,30 +4921,22 @@ function component_context_for_path(string $rel, array $componentChecksums): ?ar
 }
 
 function file_hashes(string $path): ?array {
-    $fh = @fopen($path, 'rb');
-    if (!$fh) {
+    // hash_file() streams through the hash extension without allocating the
+    // previous 1 MiB fread() buffer in PHP-managed memory. On 128 MiB hosting
+    // CLIs that buffer could cause a fatal error when a large scan/report/cache
+    // had already brought the process close to its memory limit.
+    $md5 = @hash_file('md5', $path);
+    if (!is_string($md5)) {
+        return null;
+    }
+    $sha256 = @hash_file('sha256', $path);
+    if (!is_string($sha256)) {
         return null;
     }
 
-    $md5 = hash_init('md5');
-    $sha256 = hash_init('sha256');
-    while (!feof($fh)) {
-        $chunk = fread($fh, 1048576);
-        if ($chunk === false) {
-            fclose($fh);
-            return null;
-        }
-        if ($chunk === '') {
-            continue;
-        }
-        hash_update($md5, $chunk);
-        hash_update($sha256, $chunk);
-    }
-    fclose($fh);
-
     return [
-        'md5' => strtolower(hash_final($md5)),
-        'sha256' => strtolower(hash_final($sha256)),
+        'md5' => strtolower($md5),
+        'sha256' => strtolower($sha256),
     ];
 }
 
