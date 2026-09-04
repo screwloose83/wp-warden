@@ -4674,6 +4674,10 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
     if (!$deepScanAllowed) {
         // Metadata, checksum, location and magic checks above have completed.
         // Do not load an arbitrarily large file into memory for deep inspection.
+        // Still inspect a bounded prefix of PHP-like files for a small set of
+        // high-confidence loader signatures. Malware commonly pads an otherwise
+        // obvious loader past --max-size to evade whole-file rule engines.
+        scan_large_php_prefix_safely($path, $rel, $hashes);
     } elseif (is_wordpress_l10n_php($rel)) {
         scan_wordpress_l10n_php_safely($path, $rel, $hashes);
     } else {
@@ -4699,6 +4703,44 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
             'hashes' => $hashes,
             'recommended_action' => 'Add local core checksum intel or verify against official package.',
         ]);
+    }
+}
+
+function scan_large_php_prefix_safely(string $path, string $rel, array $hashes): void {
+    $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
+    if (!is_php_like_extension($ext)) {
+        return;
+    }
+
+    // Keep this independent of file size: only the first 256 KiB is read and
+    // only literal-gated, reviewed signatures are evaluated.
+    $data = @file_get_contents($path, false, null, 0, 262144);
+    if (!is_string($data) || $data === '') {
+        return;
+    }
+
+    $matches = null;
+    if (stripos($data, 'eval') !== false
+        && stripos($data, 'base64_decode') !== false
+        && warden_preg_match(
+            '/\beval\s*(?:\/\*[\s\S]*?\*\/\s*)*\(\s*(?:\/\*[\s\S]*?\*\/\s*)*\bbase64_decode\s*(?:\/\*[\s\S]*?\*\/\s*)*\(/i',
+            $data,
+            $matches,
+            0,
+            0,
+            ['rule_id' => 'BUILTIN_LARGE_PHP_EVAL_BASE64_PREFIX_001', 'path' => $rel]
+        ) === 1
+    ) {
+        add_finding([
+            'severity' => 'critical',
+            'type' => 'builtin_malware_heuristic',
+            'rule_id' => 'BUILTIN_LARGE_PHP_EVAL_BASE64_PREFIX_001',
+            'path' => $path,
+            'relative_path' => $rel,
+            'reason' => 'Oversized PHP file begins with a base64-decoded payload passed directly to eval().',
+            'hashes' => $hashes,
+            'recommended_action' => 'Quarantine the file and investigate the site for related persistence and credential compromise.',
+        ], true);
     }
 }
 
@@ -5565,6 +5607,7 @@ function trusted_builtin_auto_quarantine_rule_ids(): array {
         // legitimate plugins generate constrained class declarations with
         // eval($code), so that broad signal is unsafe for unattended action.
         'BUILTIN_EVAL_BASE64_PAYLOAD_001',
+        'BUILTIN_LARGE_PHP_EVAL_BASE64_PREFIX_001',
         'BUILTIN_COOKIE_STRROT13_BASE64_DROPPER_001',
         'BUILTIN_AUTOLOAD_TEMP_REQUIRE_001',
         'BUILTIN_WP_TIMESTOMP_SELF_DELETE_001',
