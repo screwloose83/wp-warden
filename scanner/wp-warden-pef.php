@@ -83,6 +83,14 @@ $cleanupMalwareCronAuto = isset($opts['cleanup-malware-cron-auto']);
 $promptUnknownAdmins = isset($opts['prompt-unknown-admins']);
 $excludePdf = isset($opts['exclude-pdf']);
 $vulnerabilityScan = isset($opts['vulnerability-scan']);
+$installUpdates = isset($opts['install-updates']);
+$updateCore = isset($opts['update-core']);
+$updatePlugins = isset($opts['update-plugins']);
+$updateThemes = isset($opts['update-themes']);
+$updateAllAuto = isset($opts['update-all-auto']);
+$updateCoreAuto = isset($opts['update-core-auto']) || $updateAllAuto;
+$updatePluginsAuto = isset($opts['update-plugins-auto']) || $updateAllAuto;
+$updateThemesAuto = isset($opts['update-themes-auto']) || $updateAllAuto;
 $wordfenceApiKeyFile = isset($opts['wordfence-api-key-file']) && is_string($opts['wordfence-api-key-file'])
     ? normalize_path($opts['wordfence-api-key-file'])
     : normalize_path(dirname(__DIR__) . '/wordfence-intelligence.key');
@@ -125,6 +133,7 @@ $state = [
         'themes' => [],
         'unknown' => [],
         'auto_update' => [],
+        'install_actions' => [],
     ],
     'vulnerabilities' => [
         'enabled' => $vulnerabilityScan,
@@ -305,6 +314,7 @@ $state['timing']['file_scan_seconds'] = round(microtime(true) - $scanStartedMicr
 save_file_cache();
 say("File scan complete. Auditing WordPress admin users...", true);
 audit_wordpress_admins($wpRoot, $intel);
+install_wordpress_updates($wpRoot);
 say("Building report...", true);
 
 $state['finished_at'] = gmdate('c');
@@ -358,6 +368,14 @@ function print_help(): void {
     echo "  --no-file-cache         Disable persistent clean-file cache and force full scan\n";
     echo "  --exclude-pdf           Skip PDF files entirely (faster, but PDF malware/polyglot checks are disabled)\n";
     echo "  --vulnerability-scan    Scan WordPress core/plugins/themes with Wordfence Intelligence (when configured) and Composer packages with OSV\n";
+    echo "  --install-updates       In interactive mode, offer each available core/plugin/theme update individually; requires --apply to install\n";
+    echo "  --update-core           Interactively offer the available WordPress core update\n";
+    echo "  --update-plugins        Interactively offer each available plugin update\n";
+    echo "  --update-themes         Interactively offer each available theme update\n";
+    echo "  --update-core-auto      Install an available WordPress core update without prompting; requires --apply\n";
+    echo "  --update-plugins-auto   Install available plugin updates without prompting; requires --apply\n";
+    echo "  --update-themes-auto    Install available theme updates without prompting; requires --apply\n";
+    echo "  --update-all-auto       Enable all three automatic WordPress update categories; requires --apply\n";
     echo "  --wordfence-api-key-file=FILE  Wordfence Intelligence V3 API key file (default ../wordfence-intelligence.key); WORDFENCE_INTEL_API_KEY env also supported\n";
     echo "  --allow-wp-content-dir=a,b  Allow additional top-level wp-content directories (comma-separated)\n";
     echo "  --quarantine-wp-content-auto  With --apply and --quarantine, quarantine HIGH/CRITICAL unexpected wp-content directories\n";
@@ -7169,10 +7187,149 @@ function wordfence_cache_status(string $intelDir): array {
     return $out;
 }
 
+function install_wordpress_updates(string $wpRoot): void {
+    global $state, $intelDir, $apply, $interactive, $nonInteractive;
+    global $installUpdates, $updateCore, $updatePlugins, $updateThemes;
+    global $updateCoreAuto, $updatePluginsAuto, $updateThemesAuto;
+    global $fileCachePath, $fileCacheEntries, $fileCacheDirty;
+
+    $requested = $installUpdates || $updateCore || $updatePlugins || $updateThemes
+        || $updateCoreAuto || $updatePluginsAuto || $updateThemesAuto;
+    if (!$requested) {
+        return;
+    }
+
+    $manualRequested = $installUpdates || $updateCore || $updatePlugins || $updateThemes;
+    $autoRequested = $updateCoreAuto || $updatePluginsAuto || $updateThemesAuto;
+    if (!$apply) {
+        say('WARN: WordPress update installation requires --apply; no updates were installed.', true);
+        return;
+    }
+    if ($manualRequested && (!$interactive || $nonInteractive)) {
+        say('WARN: Manual WordPress update options require interactive mode; manual updates were skipped.', true);
+    }
+    if (!command_exists('wp')) {
+        say('WARN: WP-CLI was not found; requested WordPress updates could not be installed.', true);
+        $state['updates']['install_actions'][] = [
+            'type' => 'runtime', 'slug' => 'wp-cli', 'status' => 'failed',
+            'reason' => 'WP-CLI executable not found',
+        ];
+        return;
+    }
+
+    $candidates = [];
+    if (!empty($state['updates']['core']['outdated'])) {
+        $candidates[] = [
+            'type' => 'core', 'slug' => 'wordpress',
+            'installed' => (string)$state['updates']['core']['installed'],
+            'latest' => (string)$state['updates']['core']['latest'],
+        ];
+    }
+    foreach (($state['updates']['plugins'] ?? []) as $item) {
+        if (!empty($item['outdated'])) {
+            $candidates[] = ['type'=>'plugin'] + $item;
+        }
+    }
+    foreach (($state['updates']['themes'] ?? []) as $item) {
+        if (!empty($item['outdated'])) {
+            $candidates[] = ['type'=>'theme'] + $item;
+        }
+    }
+
+    $updated = false;
+    foreach ($candidates as $candidate) {
+        $type = (string)$candidate['type'];
+        $manualForType = $installUpdates
+            || ($type === 'core' && $updateCore)
+            || ($type === 'plugin' && $updatePlugins)
+            || ($type === 'theme' && $updateThemes);
+        $autoForType = ($type === 'core' && $updateCoreAuto)
+            || ($type === 'plugin' && $updatePluginsAuto)
+            || ($type === 'theme' && $updateThemesAuto);
+        if (!$manualForType && !$autoForType) {
+            continue;
+        }
+
+        $slug = (string)($candidate['slug'] ?? 'wordpress');
+        $installed = (string)($candidate['installed'] ?? '?');
+        $latest = (string)($candidate['latest'] ?? '?');
+        if (!$autoForType) {
+            if (!$interactive || $nonInteractive) {
+                continue;
+            }
+            echo "[UPDATE] $type $slug $installed -> $latest\n";
+            echo "Install this update? [y/N]: ";
+            $answer = strtolower(trim((string)fgets(STDIN)));
+            if ($answer !== 'y' && $answer !== 'yes') {
+                $state['updates']['install_actions'][] = [
+                    'type'=>$type, 'slug'=>$slug, 'installed'=>$installed,
+                    'latest'=>$latest, 'status'=>'skipped',
+                ];
+                continue;
+            }
+        }
+
+        $parts = ['wp'];
+        if ($type === 'core') {
+            $parts = array_merge($parts, ['core', 'update']);
+        } elseif ($type === 'plugin') {
+            $parts = array_merge($parts, ['plugin', 'update', $slug]);
+        } else {
+            $parts = array_merge($parts, ['theme', 'update', $slug]);
+        }
+        $parts[] = '--path=' . $wpRoot;
+        $parts[] = '--skip-plugins';
+        $parts[] = '--skip-themes';
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $parts[] = '--allow-root';
+        }
+        $command = implode(' ', array_map('escapeshellarg', $parts)) . ' 2>&1';
+        say("[UPDATE-INSTALL] $type $slug $installed -> $latest", true);
+        $output = [];
+        $exitCode = 1;
+        @exec($command, $output, $exitCode);
+        $action = [
+            'type'=>$type, 'slug'=>$slug, 'installed'=>$installed,
+            'latest'=>$latest, 'status'=>$exitCode === 0 ? 'installed' : 'failed',
+            'exit_code'=>$exitCode,
+        ];
+        if ($output !== []) {
+            $action['output'] = implode("\n", array_slice($output, -20));
+        }
+        $state['updates']['install_actions'][] = $action;
+        if ($exitCode === 0) {
+            $updated = true;
+            say("[UPDATED] $type $slug", true);
+        } else {
+            say("[UPDATE-FAIL] $type $slug (WP-CLI exit $exitCode)", true);
+            foreach (array_slice($output, -5) as $line) {
+                say('  ' . $line, true);
+            }
+        }
+    }
+
+    if ($updated) {
+        // Every updated file has new metadata and content. Remove this site's
+        // cache so the required follow-up scan cannot trust pre-update entries.
+        if (is_string($fileCachePath) && $fileCachePath !== '' && is_file($fileCachePath)) {
+            @unlink($fileCachePath);
+        }
+        $fileCacheEntries = [];
+        $fileCacheDirty = false;
+        $actions = $state['updates']['install_actions'];
+        $state['updates'] = check_update_health($wpRoot, detect_wp_version($wpRoot), $intelDir);
+        $state['updates']['install_actions'] = $actions;
+        say('NOTICE: WordPress files changed after scanning; run WP-Warden again to verify the installed updates.', true);
+    } elseif ($autoRequested && $candidates === []) {
+        say('WordPress updates: no outdated core, plugins, or themes were found in the requested categories.', true);
+    }
+}
+
 function check_update_health(string $wpRoot, ?string $wpVersion, string $intelDir): array {
     $result=[
         'core'=>null,'plugins'=>[],'themes'=>[],'unknown'=>[],
-        'private_or_custom'=>[],'auto_update'=>detect_auto_update_config($wpRoot)
+        'private_or_custom'=>[],'auto_update'=>detect_auto_update_config($wpRoot),
+        'install_actions'=>[]
     ];
 
     if ($wpVersion) {
@@ -7392,6 +7549,18 @@ function print_human_report(array $report, ?string $jsonPath): void {
         foreach (($updates['private_or_custom'] ?? []) as $x) echo "  [PRIVATE/CUSTOM UPDATE SOURCE] " . ($x['type']??'component') . " " . ($x['slug']??'') . " " . ($x['installed']??'') . " - " . ($x['reason']??'') . PHP_EOL;
         $a=$updates['auto_update'] ?? [];
         echo "  Auto-update config: DISALLOW_FILE_MODS=".($a['DISALLOW_FILE_MODS']??'not set').", AUTOMATIC_UPDATER_DISABLED=".($a['AUTOMATIC_UPDATER_DISABLED']??'not set').", WP_AUTO_UPDATE_CORE=".($a['WP_AUTO_UPDATE_CORE']??'not set').PHP_EOL;
+        echo PHP_EOL;
+    }
+    if (!empty($updates['install_actions'])) {
+        echo "WordPress Update Actions:" . PHP_EOL;
+        foreach ($updates['install_actions'] as $action) {
+            $type = strtoupper((string)($action['type'] ?? 'component'));
+            $slug = (string)($action['slug'] ?? '');
+            $status = strtoupper((string)($action['status'] ?? 'unknown'));
+            $from = (string)($action['installed'] ?? '');
+            $to = (string)($action['latest'] ?? '');
+            echo "  [$status] $type $slug" . ($from !== '' || $to !== '' ? " $from -> $to" : '') . PHP_EOL;
+        }
         echo PHP_EOL;
     }
     if (!empty($report['timing'])) {

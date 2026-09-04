@@ -16,10 +16,12 @@ RUN_DATE="$(date +%Y-%m-%d)"
 RUN_TIME="$(date +%H%M%S)"
 RUN_LOG_DIR="${LOG_ROOT}/${RUN_DATE}"
 RECENT_PHP_OPTION=""
+SITE_UPDATE_OPTIONS=()
+SITE_UPDATE_APPLY=()
 RECOVER_MISSING_INTEL="${WP_WARDEN_RECOVER_MISSING_INTEL:-1}"
 mkdir -p "$RUN_LOG_DIR"
 
-usage(){ echo "Usage: $0 [--recent-php-days=N] (domain.com.au | --all) | --check-updates | --self-update"; exit 1; }
+usage(){ echo "Usage: $0 [--recent-php-days=N] [--update-core-auto] [--update-plugins-auto] [--update-themes-auto|--update-all-auto] (domain.com.au | --all) | --check-updates | --self-update"; exit 1; }
 line(){ echo "======================================================================"; }
 scan_scope_label(){
     if [ -n "$RECENT_PHP_OPTION" ]; then
@@ -535,7 +537,7 @@ scan_site(){
  php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --cleanup-malware-cron-auto --quarantine-extra-core-auto --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --quarantine="$QUARANTINE" 2>&1 | tee -a "$SITE_LOG"
  CLEANUP_EXIT=${PIPESTATUS[0]}
  { echo; echo ">>> PASS 1 EXIT CODE: $CLEANUP_EXIT"; echo ">>> PASS 2: POST-CLEANUP VERIFY (cache enabled, no checksum refetch)"; } | tee -a "$SITE_LOG"
- php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --vulnerability-scan --report-json="$REPORT" 2>&1 | tee -a "$SITE_LOG"
+ php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --vulnerability-scan --report-json="$REPORT" "${SITE_UPDATE_APPLY[@]}" "${SITE_UPDATE_OPTIONS[@]}" 2>&1 | tee -a "$SITE_LOG"
  VERIFY_EXIT=${PIPESTATUS[0]}
  if [ -s "$REPORT" ] && command -v jq >/dev/null 2>&1; then
    CRITICAL=$(jq -r '.summary.critical // 0' "$REPORT"); HIGH=$(jq -r '.summary.high // 0' "$REPORT"); MEDIUM=$(jq -r '.summary.medium // 0' "$REPORT"); LOW=$(jq -r '.summary.low // 0' "$REPORT"); TOTAL=$(jq -r '.summary.findings_total // 0' "$REPORT")
@@ -746,6 +748,10 @@ for ARG in "$@"; do
             [[ "$RECENT_PHP_DAYS" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --recent-php-days requires a positive integer"; exit 1; }
             [ -z "$RECENT_PHP_OPTION" ] || { echo "ERROR: --recent-php-days may only be specified once"; exit 1; }
             RECENT_PHP_OPTION="--recent-php-days=$RECENT_PHP_DAYS"
+            ;;
+        --update-core-auto|--update-plugins-auto|--update-themes-auto|--update-all-auto)
+            SITE_UPDATE_OPTIONS+=("$ARG")
+            SITE_UPDATE_APPLY=(--apply)
             ;;
         *)
             [ -z "$TARGET_ARG" ] || usage

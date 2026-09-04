@@ -93,6 +93,41 @@ bash /root/wp-warden/scanner/wp-warden-scan-sites.sh --self-update
 `--self-update` refuses to overwrite tracked local changes and prints the paths
 that block an update.
 
+## Installing updates
+
+WP-Warden and WordPress updates are independently controlled. Update WP-Warden
+and its deployed intelligence bundle with:
+
+```bash
+bash /root/wp-warden/scanner/wp-warden-scan-sites.sh --self-update
+```
+
+For a WordPress site, `--install-updates` offers every available core, plugin,
+and theme update individually. Category-specific interactive options are
+`--update-core`, `--update-plugins`, and `--update-themes`:
+
+```bash
+php /root/wp-warden/scanner/wp-warden-pef.php /home/site/public_html \
+  --intel-dir=/root/wp-warden/wp-warden-intel \
+  --interactive --apply --install-updates
+```
+
+For unattended operation, explicitly select each permitted category with
+`--update-core-auto`, `--update-plugins-auto`, or `--update-themes-auto`.
+`--update-all-auto` enables all three. Every automatic form requires `--apply`.
+The multi-site wrapper accepts these automatic flags too:
+
+```bash
+bash /root/wp-warden/scanner/wp-warden-scan-sites.sh \
+  --update-plugins-auto --update-themes-auto example.com
+```
+
+Updates use WP-CLI with plugins and themes skipped during bootstrap. WP-Warden
+installs updates after the malware scan, invalidates that site's clean-file
+cache, and instructs you to run another scan over the changed files. Private
+packages can only update when their normal WP-CLI/vendor update source is
+available; a clean ZIP used as checksum intel is not installed automatically.
+
 ## Direct scanner example
 
 ```bash
