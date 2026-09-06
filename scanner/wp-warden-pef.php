@@ -5204,6 +5204,17 @@ function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes
         'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001' => true,
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001' => true,
         'PHP_PWDYT_GOTO_STRREV_REMOTE_EVAL_001' => true,
+        'PHP_ANIMAL_XOR_TEMP_INCLUDE_001' => true,
+        'PHP_SC_RESTORER_FAMILY_001' => true,
+        'PHP_SC_HASHED_HIDDEN_INCLUDE_001' => true,
+        // These reviewed data/config signatures must run before the generic
+        // PHP-context gate: SCD1 payloads and prepend directives contain no PHP tag.
+        'PHP_SC_SCD1_PACKED_CORE_001' => true,
+        'PHP_SC_KNOWN_PREPEND_CONFIG_001' => true,
+        'PHP_SC_OBFUSCATED_CORE_001' => true,
+        'PHP_ONYX_WRAPPER_RESTORER_001' => true,
+        'PHP_ONYX_AERO_BRIDGE_IMPLANT_001' => true,
+        'PHP_ONYX_STATUS_BEACON_001' => true,
     ];
     $matchedIds = [];
 
