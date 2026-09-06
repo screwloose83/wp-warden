@@ -86,8 +86,13 @@ Run an interactive server-wide process check without a filesystem scan:
 bash /root/wp-warden/scanner/wp-warden-scan-sites.sh --check-processes
 ```
 
-This checks each unique WordPress hosting-account UID against reviewed process
-intel and offers `K = kill` or `S = skip` for matches.
+This reads `/proc` once for the whole server and offers `K = kill` or `S = skip`
+for reviewed matches. For unattended termination of reviewed critical process
+matches, run:
+
+```bash
+bash /root/wp-warden/scanner/wp-warden-scan-sites.sh --kill-processes-auto
+```
 
 The wrapper creates per-site quarantine directories and writes logs beneath
 `/root/wp-warden/logs`. Review the first run carefully before scheduling it.

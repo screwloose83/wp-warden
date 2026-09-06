@@ -48,9 +48,9 @@
       "confidence": "high",
       "auto_kill": true,
       "match": {
-        "cmdline_regex": "(?:^|\\s)\\./python(?:3\\.[0-9]+[A-Za-z]|2\\.6[0-9])(?:\\s|$)"
+        "cmdline_regex": "(?:^|\\s)\\./python(?:3\\.(?:[0-9]+[A-Za-z]|61)|2\\.6[0-9])(?:\\s|$)"
       },
-      "description": "A locally executed binary uses a fake Python version name such as python3.6l or python2.64, observed beside the Onyx/SC compromise."
+      "description": "A locally executed binary uses a fake Python version name such as python3.6l, python3.61 or python2.64, observed beside the Onyx/SC compromise."
     },
     {
       "id": "PROC_EXEC_FROM_ACCOUNT_TMP_004",

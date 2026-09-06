@@ -2,7 +2,7 @@
 set -u
 set -o pipefail
 
-WRAPPER_VERSION="0.1.66"
+WRAPPER_VERSION="0.1.67"
 
 REPO_ROOT="${WP_WARDEN_REPO_ROOT:-/root/wp-warden}"
 INTEL_ROOT="${WP_WARDEN_INTEL_ROOT:-${REPO_ROOT}/wp-warden-intel}"
@@ -21,7 +21,7 @@ SITE_UPDATE_APPLY=()
 RECOVER_MISSING_INTEL="${WP_WARDEN_RECOVER_MISSING_INTEL:-1}"
 mkdir -p "$RUN_LOG_DIR"
 
-usage(){ echo "Usage: $0 [--recent-php-days=N] [--update-core-auto] [--update-plugins-auto] [--update-themes-auto|--update-all-auto] (domain.com.au | --all) | --check-processes | --check-updates | --self-update"; exit 1; }
+usage(){ echo "Usage: $0 [--recent-php-days=N] [--update-core-auto] [--update-plugins-auto] [--update-themes-auto|--update-all-auto] (domain.com.au | --all) | --check-processes | --kill-processes-auto | --check-updates | --self-update"; exit 1; }
 line(){ echo "======================================================================"; }
 scan_scope_label(){
     if [ -n "$RECENT_PHP_OPTION" ]; then
@@ -696,14 +696,24 @@ trigger_missing_intel_recovery(){
 }
 
 check_server_processes(){
+ local MODE="${1:-interactive}"
  line
  echo " WP-WARDEN - SERVER PROCESS CHECK"
  echo " Scanner: $WARDEN"
- echo " Mode: interactive (K=kill, S=skip)"
+ if [ "$MODE" = auto ]; then
+   echo " Mode: automatic kill (reviewed CRITICAL auto_kill rules only)"
+ else
+   echo " Mode: interactive (K=kill, S=skip)"
+ fi
  line
  echo "Reading /proc directly; no account or WordPress enumeration."
- php "$WARDEN" --intel-dir="$INTEL_ROOT" \
-   --server-processes-only --prompt-malicious-processes --interactive --apply
+ if [ "$MODE" = auto ]; then
+   php "$WARDEN" --intel-dir="$INTEL_ROOT" \
+     --server-processes-only --kill-malicious-processes-auto --noninteractive --apply
+ else
+   php "$WARDEN" --intel-dir="$INTEL_ROOT" \
+     --server-processes-only --prompt-malicious-processes --interactive --apply
+ fi
  return $?
 }
 
@@ -774,10 +784,14 @@ done
 set --
 [ -z "$TARGET_ARG" ] || set -- "$TARGET_ARG"
 
-if [ "${1:-}" = "--check-processes" ]; then
+if [ "${1:-}" = "--check-processes" ] || [ "${1:-}" = "--kill-processes-auto" ]; then
   WARDEN=$(find_warden)
   [ -f "$WARDEN" ] || { echo "ERROR: WP-Warden not found: $WARDEN"; exit 1; }
-  check_server_processes
+  if [ "$1" = "--kill-processes-auto" ]; then
+    check_server_processes auto
+  else
+    check_server_processes interactive
+  fi
   exit $?
 fi
 cleanup_old_logs

@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.66)
+## Scanner diagnostics and self-test (v0.1.67)
 
 The scanner reports PCRE failures as errors rather than treating them as clean
 no-matches. Slow diagnostics are opt-in by threshold (the defaults only print
@@ -177,6 +177,20 @@ process, including UID 0 matches because every kill remains an explicit choice.
 It does not kill merely unknown processes and does not automatically choose an
 answer. Use the normal multi-site scan when you want reviewed critical matches
 terminated automatically within each site's UID boundary.
+
+To scan `/proc` once and automatically terminate every reviewed critical match
+marked `auto_kill`, use the separate explicit option:
+
+```bash
+/root/wp-warden/scanner/wp-warden-scan-sites.sh --kill-processes-auto
+```
+
+This covers the random `php /home/ACCOUNT/tmp/php...` payloads and fake Python
+executables under system/account temporary directories shown in the incident.
+`PROC_DELETED_EXE_001` alone remains report-only because legitimate services can
+temporarily retain a deleted executable after an upgrade; a deleted process in
+an account temp directory also matches the reviewed temp-executable rule and is
+therefore terminated.
 
 ## Fetch Official Checksums
 
