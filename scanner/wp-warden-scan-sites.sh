@@ -2,7 +2,7 @@
 set -u
 set -o pipefail
 
-WRAPPER_VERSION="0.1.65"
+WRAPPER_VERSION="0.1.66"
 
 REPO_ROOT="${WP_WARDEN_REPO_ROOT:-/root/wp-warden}"
 INTEL_ROOT="${WP_WARDEN_INTEL_ROOT:-${REPO_ROOT}/wp-warden-intel}"
@@ -695,78 +695,16 @@ trigger_missing_intel_recovery(){
  ' "${REPORTS[@]}" 2>/dev/null)
 }
 
-discover_process_accounts(){
- local ACCOUNT HOME_DIR ROOT UID_VALUE
-
- # Process inspection needs only a trustworthy account UID boundary. Avoid
- # WordPress bootstrap, domain lookup and vhost parsing so a compromised site
- # cannot delay or block the server-wide process check.
- if [ -d "$VIRTUAL_ROOT" ]; then
-   while IFS= read -r -d '' HOME_DIR; do
-     ACCOUNT="$(basename "$HOME_DIR")"
-     case "$ACCOUNT" in site*|admin*|FILESYSTEMTEMPLATE) continue;; esac
-     ROOT="${VIRTUAL_ROOT}/${ACCOUNT}/var/www/html"
-     [ -d "$ROOT" ] || continue
-     printf 'apiscp|%s|%s|%s\n' "$ACCOUNT" "$ROOT" "$ACCOUNT"
-   done < <(find "$VIRTUAL_ROOT" -mindepth 1 -maxdepth 1 \( -type l -o -type d \) -print0 2>/dev/null)
- fi
-
- for HOME_DIR in "$CWP_HOME_ROOT"/*; do
-   [ -d "$HOME_DIR" ] || continue
-   ACCOUNT="$(basename "$HOME_DIR")"
-   [ "$HOME_DIR" = "$VIRTUAL_ROOT" ] && continue
-   ROOT="$HOME_DIR"
-   [ -d "$HOME_DIR/public_html" ] && ROOT="$HOME_DIR/public_html"
-   UID_VALUE="$(stat -Lc '%u' "$ROOT" 2>/dev/null || true)"
-   [ -n "$UID_VALUE" ] && [ "$UID_VALUE" -gt 0 ] 2>/dev/null || continue
-   printf 'cwp|%s|%s|%s\n' "$ACCOUNT" "$ROOT" "$ACCOUNT"
- done
-}
-
 check_server_processes(){
- local ENTRY PLATFORM SITE_ID SITE_ROOT DOMAIN KEY UID_VALUE RC
- local ACCOUNT_COUNT=0 MATCHED_COUNT=0
- local -A SEEN_ACCOUNTS=()
- local -a SITES=()
-
  line
  echo " WP-WARDEN - SERVER PROCESS CHECK"
  echo " Scanner: $WARDEN"
  echo " Mode: interactive (K=kill, S=skip)"
  line
- echo "Discovering hosting-account UIDs (no WordPress bootstrap)..."
-
- mapfile -t SITES < <(discover_process_accounts)
- [ "${#SITES[@]}" -gt 0 ] || { echo "No hosting accounts found."; return 1; }
- echo "Discovered ${#SITES[@]} account path(s); checking each unique UID."
-
- for ENTRY in "${SITES[@]}"; do
-   IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DOMAIN <<< "$ENTRY"
-   UID_VALUE="$(stat -Lc '%u' "$SITE_ROOT" 2>/dev/null || true)"
-   KEY="${UID_VALUE:-${PLATFORM}:${SITE_ID}}"
-   [ -z "${SEEN_ACCOUNTS[$KEY]:-}" ] || continue
-   SEEN_ACCOUNTS[$KEY]=1
-   ACCOUNT_COUNT=$((ACCOUNT_COUNT+1))
-
-   echo
-   line
-   echo " ACCOUNT: $SITE_ID${DOMAIN:+ ($DOMAIN)}"
-   echo " UID: ${UID_VALUE:-unknown}"
-   echo " Root: $SITE_ROOT"
-   line
-   php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" \
-     --processes-only --prompt-malicious-processes --interactive --apply
-   RC=$?
-   [ "$RC" -eq 1 ] && MATCHED_COUNT=$((MATCHED_COUNT+1))
- done
-
- echo
- line
- echo " PROCESS CHECK COMPLETE"
- echo " Accounts checked: $ACCOUNT_COUNT"
- echo " Accounts with findings: $MATCHED_COUNT"
- line
- return 0
+ echo "Reading /proc directly; no account or WordPress enumeration."
+ php "$WARDEN" --intel-dir="$INTEL_ROOT" \
+   --server-processes-only --prompt-malicious-processes --interactive --apply
+ return $?
 }
 
 scan_all(){

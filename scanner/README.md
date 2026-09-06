@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.65)
+## Scanner diagnostics and self-test (v0.1.66)
 
 The scanner reports PCRE failures as errors rather than treating them as clean
 no-matches. Slow diagnostics are opt-in by threshold (the defaults only print
@@ -170,13 +170,13 @@ database, update, or vulnerability scans, use:
 /root/wp-warden/scanner/wp-warden-scan-sites.sh --check-processes
 ```
 
-The wrapper discovers hosting-account UIDs directly from CWP/ApisCP home paths,
-without bootstrapping WordPress, querying its database, parsing vhosts, or
-performing an update check. It prints progress immediately, deduplicates paths
-sharing the same Unix UID, and shows `K = kill` or `S = skip` for each matching
-process. It does not kill merely unknown processes and does not automatically
-choose an answer. Use the normal multi-site scan when you want reviewed critical
-matches terminated automatically.
+The wrapper reads `/proc` once for the whole server, without enumerating hosting
+accounts, WordPress sites, home directories, databases, or vhosts and without
+performing an update check. It shows `K = kill` or `S = skip` for each matching
+process, including UID 0 matches because every kill remains an explicit choice.
+It does not kill merely unknown processes and does not automatically choose an
+answer. Use the normal multi-site scan when you want reviewed critical matches
+terminated automatically within each site's UID boundary.
 
 ## Fetch Official Checksums
 

@@ -7,14 +7,15 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.65';
+const WP_WARDEN_VERSION = '0.1.66';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
+$serverProcessesOnlyRequested = isset($opts['server-processes-only']);
 @ini_set('pcre.backtrack_limit', '500000');
 @ini_set('pcre.recursion_limit', '500000');
 
-if (isset($opts['help']) || (empty($opts['target']) && !isset($opts['self-test']))) {
+if (isset($opts['help']) || (empty($opts['target']) && !isset($opts['self-test']) && !$serverProcessesOnlyRequested)) {
     print_help();
     exit(isset($opts['help']) ? 0 : 1);
 }
@@ -41,7 +42,7 @@ if (isset($opts['self-test'])) {
     exit(run_self_test($intelDir, $slowRuleMs));
 }
 
-$target = normalize_path($opts['target']);
+$target = $serverProcessesOnlyRequested ? '/proc' : normalize_path($opts['target']);
 if (!is_dir($target)) {
     fwrite(STDERR, "ERROR: target is not a directory: {$opts['target']}\n");
     exit(1);
@@ -81,6 +82,8 @@ $cleanupMalwareUsersAuto = isset($opts['cleanup-malware-users-auto']);
 $cleanupDatabasePersistenceAuto = isset($opts['cleanup-database-persistence-auto']);
 $cleanupMalwareCronAuto = isset($opts['cleanup-malware-cron-auto']);
 $processesOnly = isset($opts['processes-only']);
+$serverProcessesOnly = isset($opts['server-processes-only']);
+$processesOnly = $processesOnly || $serverProcessesOnly;
 $promptMaliciousProcesses = isset($opts['prompt-malicious-processes']);
 $scanProcesses = isset($opts['scan-processes']) || isset($opts['kill-malicious-processes-auto'])
     || $processesOnly || $promptMaliciousProcesses;
@@ -215,8 +218,10 @@ if ($promptMaliciousProcesses && (!$apply || !$interactive || $nonInteractive)) 
 }
 if ($scanProcesses) {
     $processStartedMicro = microtime(true);
-    say("[EARLY PROCESS AUDIT] Checking site-account processes before filesystem and database work...", true);
-    audit_site_processes($wpRoot, $intel);
+    say($serverProcessesOnly
+        ? "[SERVER PROCESS AUDIT] Checking /proc directly without account or site enumeration..."
+        : "[EARLY PROCESS AUDIT] Checking site-account processes before filesystem and database work...", true);
+    audit_site_processes($wpRoot, $intel, $serverProcessesOnly);
     $state['timing']['process_audit_seconds'] = round(microtime(true) - $processStartedMicro, 3);
 }
 if ($processesOnly) {
@@ -397,6 +402,7 @@ function print_help(): void {
     echo "  --cleanup-malware-cron-auto Remove confirmed Base64 PHP-recreation jobs from the site owner's crontab; backs up the crontab and requires --apply and --quarantine=DIR\n";
     echo "  --scan-processes         Report processes owned by the WordPress site account that match process intel\n";
     echo "  --processes-only         Run only the process audit, then print the report and exit\n";
+    echo "  --server-processes-only  Inspect all visible server processes directly from /proc; no target or account enumeration required\n";
     echo "  --prompt-malicious-processes Interactively offer K=kill or S=skip for each matched process; implies --scan-processes and requires --apply\n";
     echo "  --kill-malicious-processes-auto Terminate only reviewed CRITICAL process rules marked auto_kill; implies --scan-processes and requires --apply\n";
     echo "  --prompt-unknown-admins Prompt to remove unapproved/unverified admin users; requires --apply to delete\n";
@@ -4135,7 +4141,7 @@ function classify_scan_file(string $rel): string {
     return 'text';
 }
 
-function audit_site_processes(string $root, array $intel): void {
+function audit_site_processes(string $root, array $intel, bool $allUsers = false): void {
     global $state, $apply, $interactive, $nonInteractive,
            $killMaliciousProcessesAuto, $promptMaliciousProcesses;
 
@@ -4145,18 +4151,22 @@ function audit_site_processes(string $root, array $intel): void {
         return;
     }
 
-    $siteUid = @fileowner($root);
-    if (!is_int($siteUid)) {
-        $state['process_audit']['errors'][] = 'Could not determine WordPress site owner UID.';
-        say('WARN: could not determine site owner UID; process audit skipped', true);
-        return;
+    $siteUid = null;
+    if ($allUsers) {
+        $state['process_audit']['site_uid'] = 'all';
+    } else {
+        $siteUid = @fileowner($root);
+        if (!is_int($siteUid)) {
+            $state['process_audit']['errors'][] = 'Could not determine WordPress site owner UID.';
+            say('WARN: could not determine site owner UID; process audit skipped', true);
+            return;
+        }
+        $state['process_audit']['site_uid'] = $siteUid;
     }
-    $state['process_audit']['site_uid'] = $siteUid;
 
     // A root-owned document root is not a safe account boundary. Report this and
     // refuse process termination rather than treating every root process as in scope.
-    $allowKill = $killMaliciousProcessesAuto && $apply && $siteUid !== 0;
-    if ($killMaliciousProcessesAuto && $siteUid === 0) {
+    if (!$allUsers && $killMaliciousProcessesAuto && $siteUid === 0) {
         $state['process_audit']['errors'][] = 'Automatic process termination refused for UID 0.';
         say('WARN: site root is owned by UID 0; malicious processes will be reported but not killed', true);
     }
@@ -4168,7 +4178,7 @@ function audit_site_processes(string $root, array $intel): void {
             continue;
         }
         $process = read_linux_process($pid);
-        if ($process === null || $process['uid'] !== $siteUid || $process['cmdline'] === '') {
+        if ($process === null || (!$allUsers && $process['uid'] !== $siteUid) || $process['cmdline'] === '') {
             continue;
         }
         $state['process_audit']['scanned']++;
@@ -4187,7 +4197,7 @@ function audit_site_processes(string $root, array $intel): void {
                 'path' => $process['exe'],
                 'relative_path' => 'process:' . $pid,
                 'pid' => $pid,
-                'uid' => $siteUid,
+                'uid' => $process['uid'],
                 'exe' => $process['exe'],
                 'cwd' => $process['cwd'],
                 'cmdline' => $process['cmdline'],
@@ -4197,13 +4207,15 @@ function audit_site_processes(string $root, array $intel): void {
             ]);
 
             $reviewedAutoKill = !empty($rule['auto_kill']) && $severity === 'critical';
+            $allowKill = $killMaliciousProcessesAuto && $apply && $process['uid'] !== 0;
             if ($allowKill && $reviewedAutoKill) {
                 if (terminate_validated_process($process, $ruleId)) {
                     break;
                 }
-            } elseif ($promptMaliciousProcesses && $apply && $interactive && !$nonInteractive && $siteUid !== 0) {
+            } elseif ($promptMaliciousProcesses && $apply && $interactive && !$nonInteractive
+                && ($allUsers || $siteUid !== 0)) {
                 echo "  PID: $pid" . PHP_EOL;
-                echo "  UID: $siteUid" . PHP_EOL;
+                echo "  UID: {$process['uid']}" . PHP_EOL;
                 echo "  EXE: " . ($process['exe'] !== '' ? $process['exe'] : '(unavailable)') . PHP_EOL;
                 echo "  CWD: " . ($process['cwd'] !== '' ? $process['cwd'] : '(unavailable)') . PHP_EOL;
                 echo "  CMD: {$process['cmdline']}" . PHP_EOL;
