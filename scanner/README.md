@@ -163,6 +163,19 @@ Killing a process does not remove its payload or persistence mechanism. Follow
 the reported executable/command path, quarantine the malicious file, and rerun
 the filesystem, cron, and database scans to ensure it does not respawn.
 
+For an interactive server-wide process check without running filesystem,
+database, update, or vulnerability scans, use:
+
+```bash
+/root/wp-warden/scanner/wp-warden-scan-sites.sh --check-processes
+```
+
+The wrapper discovers WordPress hosting accounts, deduplicates sites sharing the
+same Unix UID, and shows `K = kill` or `S = skip` for each matching process. It
+does not kill merely unknown processes and does not automatically choose an
+answer. Use the normal multi-site scan when you want reviewed critical matches
+terminated automatically.
+
 ## Fetch Official Checksums
 
 On an admin/build machine or a server with outbound HTTPS, you can fetch and cache official checksum sources into the intel directory:

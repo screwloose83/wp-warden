@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.63';
+const WP_WARDEN_VERSION = '0.1.64';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -80,7 +80,10 @@ $knownAdminsOverride = isset($opts['known-admins']) && is_string($opts['known-ad
 $cleanupMalwareUsersAuto = isset($opts['cleanup-malware-users-auto']);
 $cleanupDatabasePersistenceAuto = isset($opts['cleanup-database-persistence-auto']);
 $cleanupMalwareCronAuto = isset($opts['cleanup-malware-cron-auto']);
-$scanProcesses = isset($opts['scan-processes']) || isset($opts['kill-malicious-processes-auto']);
+$processesOnly = isset($opts['processes-only']);
+$promptMaliciousProcesses = isset($opts['prompt-malicious-processes']);
+$scanProcesses = isset($opts['scan-processes']) || isset($opts['kill-malicious-processes-auto'])
+    || $processesOnly || $promptMaliciousProcesses;
 $killMaliciousProcessesAuto = isset($opts['kill-malicious-processes-auto']);
 $promptUnknownAdmins = isset($opts['prompt-unknown-admins']);
 $excludePdf = isset($opts['exclude-pdf']);
@@ -207,11 +210,25 @@ $runStartedMicro = microtime(true);
 
 $intel = load_intel($intelDir, $policyId, $siteId);
 $wpRoot = realpath($target) ?: $target;
+if ($promptMaliciousProcesses && (!$apply || !$interactive || $nonInteractive)) {
+    say("WARN: --prompt-malicious-processes needs interactive mode and --apply to offer process termination; findings remain report-only", true);
+}
 if ($scanProcesses) {
     $processStartedMicro = microtime(true);
     say("[EARLY PROCESS AUDIT] Checking site-account processes before filesystem and database work...", true);
     audit_site_processes($wpRoot, $intel);
     $state['timing']['process_audit_seconds'] = round(microtime(true) - $processStartedMicro, 3);
+}
+if ($processesOnly) {
+    $state['finished_at'] = gmdate('c');
+    $state['timing']['total_seconds'] = round(microtime(true) - $runStartedMicro, 3);
+    $state['summary']['findings_total'] = count($state['findings']);
+    if ($reportJson) {
+        write_json_report($reportJson, $state);
+        say("Report written: $reportJson", true);
+    }
+    print_human_report($state, $reportJson);
+    exit(($state['summary']['critical'] > 0 || $state['summary']['high'] > 0) ? 1 : 0);
 }
 $wpVersion = detect_wp_version($wpRoot);
 $locale = detect_wp_locale($wpRoot);
@@ -379,6 +396,8 @@ function print_help(): void {
     echo "  --cleanup-database-persistence-auto Remove confirmed wp-config/database/tmp persistence IOCs; requires --apply and --quarantine=DIR\n";
     echo "  --cleanup-malware-cron-auto Remove confirmed Base64 PHP-recreation jobs from the site owner's crontab; backs up the crontab and requires --apply and --quarantine=DIR\n";
     echo "  --scan-processes         Report processes owned by the WordPress site account that match process intel\n";
+    echo "  --processes-only         Run only the process audit, then print the report and exit\n";
+    echo "  --prompt-malicious-processes Interactively offer K=kill or S=skip for each matched process; implies --scan-processes and requires --apply\n";
     echo "  --kill-malicious-processes-auto Terminate only reviewed CRITICAL process rules marked auto_kill; implies --scan-processes and requires --apply\n";
     echo "  --prompt-unknown-admins Prompt to remove unapproved/unverified admin users; requires --apply to delete\n";
     echo "  --no-db-audit           Skip WordPress administrator DB audit\n";
@@ -4117,7 +4136,8 @@ function classify_scan_file(string $rel): string {
 }
 
 function audit_site_processes(string $root, array $intel): void {
-    global $state, $apply, $killMaliciousProcessesAuto;
+    global $state, $apply, $interactive, $nonInteractive,
+           $killMaliciousProcessesAuto, $promptMaliciousProcesses;
 
     if (PHP_OS_FAMILY !== 'Linux' || !is_dir('/proc')) {
         $state['process_audit']['errors'][] = 'Process audit requires Linux /proc.';
@@ -4178,7 +4198,24 @@ function audit_site_processes(string $root, array $intel): void {
 
             $reviewedAutoKill = !empty($rule['auto_kill']) && $severity === 'critical';
             if ($allowKill && $reviewedAutoKill) {
-                terminate_validated_process($process, $ruleId);
+                if (terminate_validated_process($process, $ruleId)) {
+                    break;
+                }
+            } elseif ($promptMaliciousProcesses && $apply && $interactive && !$nonInteractive && $siteUid !== 0) {
+                echo "  PID: $pid" . PHP_EOL;
+                echo "  UID: $siteUid" . PHP_EOL;
+                echo "  EXE: " . ($process['exe'] !== '' ? $process['exe'] : '(unavailable)') . PHP_EOL;
+                echo "  CWD: " . ($process['cwd'] !== '' ? $process['cwd'] : '(unavailable)') . PHP_EOL;
+                echo "  CMD: {$process['cmdline']}" . PHP_EOL;
+                echo "  K = kill process, S = skip: ";
+                $choice = strtoupper(trim((string)fgets(STDIN)));
+                if ($choice === 'K' || $choice === 'KILL') {
+                    terminate_validated_process($process, $ruleId);
+                } else {
+                    say("[PROCESS-SKIP] Left PID $pid running", true);
+                }
+                // Prompt at most once for a PID even when several rules match it.
+                break;
             }
         }
     }
@@ -7869,6 +7906,19 @@ function print_human_report(array $report, ?string $jsonPath): void {
             }
             $isCount = warden_preg_match('/(?:_requests|_failures|_attempts|pcre_errors|slow_rules|slow_files)$/', (string)$k) === 1;
             echo "  $k: {$v}" . ($isCount ? '' : 's') . PHP_EOL;
+        }
+        echo PHP_EOL;
+    }
+
+    $processAudit = $report['process_audit'] ?? [];
+    if (!empty($processAudit['enabled'])) {
+        echo "Process Audit:" . PHP_EOL;
+        echo "  Site UID: " . ($processAudit['site_uid'] ?? 'unknown') . PHP_EOL;
+        echo "  Processes checked: " . (int)($processAudit['scanned'] ?? 0) . PHP_EOL;
+        echo "  Rule matches: " . (int)($processAudit['matched'] ?? 0) . PHP_EOL;
+        echo "  Processes terminated: " . (int)($processAudit['terminated'] ?? 0) . PHP_EOL;
+        foreach (($processAudit['errors'] ?? []) as $error) {
+            echo "  Warning: $error" . PHP_EOL;
         }
         echo PHP_EOL;
     }

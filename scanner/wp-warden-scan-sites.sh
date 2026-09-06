@@ -2,7 +2,7 @@
 set -u
 set -o pipefail
 
-WRAPPER_VERSION="0.1.63"
+WRAPPER_VERSION="0.1.64"
 
 REPO_ROOT="${WP_WARDEN_REPO_ROOT:-/root/wp-warden}"
 INTEL_ROOT="${WP_WARDEN_INTEL_ROOT:-${REPO_ROOT}/wp-warden-intel}"
@@ -21,7 +21,7 @@ SITE_UPDATE_APPLY=()
 RECOVER_MISSING_INTEL="${WP_WARDEN_RECOVER_MISSING_INTEL:-1}"
 mkdir -p "$RUN_LOG_DIR"
 
-usage(){ echo "Usage: $0 [--recent-php-days=N] [--update-core-auto] [--update-plugins-auto] [--update-themes-auto|--update-all-auto] (domain.com.au | --all) | --check-updates | --self-update"; exit 1; }
+usage(){ echo "Usage: $0 [--recent-php-days=N] [--update-core-auto] [--update-plugins-auto] [--update-themes-auto|--update-all-auto] (domain.com.au | --all) | --check-processes | --check-updates | --self-update"; exit 1; }
 line(){ echo "======================================================================"; }
 scan_scope_label(){
     if [ -n "$RECENT_PHP_OPTION" ]; then
@@ -695,6 +695,50 @@ trigger_missing_intel_recovery(){
  ' "${REPORTS[@]}" 2>/dev/null)
 }
 
+check_server_processes(){
+ local ENTRY PLATFORM SITE_ID SITE_ROOT DOMAIN KEY UID_VALUE RC
+ local ACCOUNT_COUNT=0 MATCHED_COUNT=0
+ local -A SEEN_ACCOUNTS=()
+ local -a SITES=()
+
+ mapfile -t SITES < <(discover_sites)
+ [ "${#SITES[@]}" -gt 0 ] || { echo "No WordPress hosting accounts found."; return 1; }
+
+ line
+ echo " WP-WARDEN - SERVER PROCESS CHECK"
+ echo " Scanner: $WARDEN"
+ echo " Mode: interactive (K=kill, S=skip)"
+ line
+
+ for ENTRY in "${SITES[@]}"; do
+   IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DOMAIN <<< "$ENTRY"
+   UID_VALUE="$(stat -Lc '%u' "$SITE_ROOT" 2>/dev/null || true)"
+   KEY="${UID_VALUE:-${PLATFORM}:${SITE_ID}}"
+   [ -z "${SEEN_ACCOUNTS[$KEY]:-}" ] || continue
+   SEEN_ACCOUNTS[$KEY]=1
+   ACCOUNT_COUNT=$((ACCOUNT_COUNT+1))
+
+   echo
+   line
+   echo " ACCOUNT: $SITE_ID${DOMAIN:+ ($DOMAIN)}"
+   echo " UID: ${UID_VALUE:-unknown}"
+   echo " Root: $SITE_ROOT"
+   line
+   php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" \
+     --processes-only --prompt-malicious-processes --interactive --apply
+   RC=$?
+   [ "$RC" -eq 1 ] && MATCHED_COUNT=$((MATCHED_COUNT+1))
+ done
+
+ echo
+ line
+ echo " PROCESS CHECK COMPLETE"
+ echo " Accounts checked: $ACCOUNT_COUNT"
+ echo " Accounts with findings: $MATCHED_COUNT"
+ line
+ return 0
+}
+
 scan_all(){
  RUNNING_ALL=1
  local START_TIME=$(date +%s) CLEAN_COUNT=0 DIRTY_COUNT=0 SKIPPED_COUNT=0 TOTAL_COUNT=0 SITE_RESULT
@@ -765,6 +809,12 @@ set --
 cleanup_old_logs
 if [ "${1:-}" = "--check-updates" ]; then check_updates 1; exit $?; fi
 if [ "${1:-}" = "--self-update" ]; then self_update; exit $?; fi
+if [ "${1:-}" = "--check-processes" ]; then
+  WARDEN=$(find_warden)
+  [ -f "$WARDEN" ] || { echo "ERROR: WP-Warden not found: $WARDEN"; exit 1; }
+  check_server_processes
+  exit $?
+fi
 check_updates 0
 WARDEN=$(find_warden)
 [ -f "$WARDEN" ] || { echo "ERROR: WP-Warden not found: $WARDEN"; exit 1; }

@@ -80,6 +80,15 @@ bash /root/wp-warden/scanner/wp-warden-scan-sites.sh --all
 bash /root/wp-warden/scanner/wp-warden-scan-sites.sh --recent-php-days=7 --all
 ```
 
+Run an interactive server-wide process check without a filesystem scan:
+
+```bash
+bash /root/wp-warden/scanner/wp-warden-scan-sites.sh --check-processes
+```
+
+This checks each unique WordPress hosting-account UID against reviewed process
+intel and offers `K = kill` or `S = skip` for matches.
+
 The wrapper creates per-site quarantine directories and writes logs beneath
 `/root/wp-warden/logs`. Review the first run carefully before scheduling it.
 
