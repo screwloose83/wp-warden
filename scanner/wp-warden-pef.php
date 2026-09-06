@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.61';
+const WP_WARDEN_VERSION = '0.1.62';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -3063,12 +3063,23 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
         'cmdline'=>'php /home/example/tmp/phpbbMYJMyx phpbb'];
     $pythonFixture = ['exe'=>'/home/example/tmp/python3.6l', 'cwd'=>'/home/example/tmp',
         'cmdline'=>'./python3.6l'];
+    $python264Fixture = ['exe'=>'/home/example/tmp/python2.64', 'cwd'=>'/home/example/tmp',
+        'cmdline'=>'./python2.64'];
     $require(isset($processRulesById['PROC_PHP_RANDOM_HOME_TMP_002'])
         && process_rule_matches($processFixture, $processRulesById['PROC_PHP_RANDOM_HOME_TMP_002']),
         'randomly named PHP payload in account tmp matches process intel');
     $require(isset($processRulesById['PROC_FAKE_LOCAL_PYTHON_BINARY_003'])
         && process_rule_matches($pythonFixture, $processRulesById['PROC_FAKE_LOCAL_PYTHON_BINARY_003']),
         'fake local Python binary matches process intel');
+    $require(process_rule_matches($python264Fixture, $processRulesById['PROC_FAKE_LOCAL_PYTHON_BINARY_003']),
+        'fake local Python 2.64 variant matches process intel');
+    $require(isset($processRulesById['PROC_EXEC_FROM_ACCOUNT_TMP_004'])
+        && process_rule_matches($python264Fixture, $processRulesById['PROC_EXEC_FROM_ACCOUNT_TMP_004']),
+        'executable under hosting account tmp matches process intel');
+    $require(process_rule_matches(
+        ['exe'=>'/tmp/random-worker', 'cwd'=>'/tmp', 'cmdline'=>'/tmp/random-worker'],
+        $processRulesById['PROC_EXEC_FROM_TMP_001'] ?? []
+    ), 'executable under system tmp matches process intel');
     $require(!process_rule_matches(
         ['exe'=>'/usr/bin/php', 'cwd'=>'/home/example/public_html',
             'cmdline'=>'php /home/example/public_html/wp-cron.php'],
@@ -4225,6 +4236,12 @@ function process_rule_matches(array $process, array $rule): bool {
     if (isset($match['exe_contains'])
         && stripos((string)$process['exe'], (string)$match['exe_contains']) === false) {
         return false;
+    }
+    if (isset($match['exe_regex'])) {
+        $pattern = '~' . str_replace('~', '\\~', (string)$match['exe_regex']) . '~i';
+        if (@preg_match($pattern, (string)$process['exe']) !== 1) {
+            return false;
+        }
     }
     if (isset($match['exe_prefixes'])) {
         $prefixMatched = false;

@@ -5,6 +5,8 @@
       "id": "PROC_EXEC_FROM_TMP_001",
       "enabled": true,
       "severity": "critical",
+      "confidence": "high",
+      "auto_kill": true,
       "match": {
         "exe_prefixes": ["/tmp/", "/var/tmp/", "/dev/shm/"]
       },
@@ -46,9 +48,20 @@
       "confidence": "high",
       "auto_kill": true,
       "match": {
-        "cmdline_regex": "(?:^|\\s)\\./python3\\.[0-9]+[A-Za-z](?:\\s|$)"
+        "cmdline_regex": "(?:^|\\s)\\./python(?:3\\.[0-9]+[A-Za-z]|2\\.6[0-9])(?:\\s|$)"
       },
-      "description": "A locally executed binary mimics a Python version name with an extra trailing letter, a pattern observed beside the Onyx/SC compromise."
+      "description": "A locally executed binary uses a fake Python version name such as python3.6l or python2.64, observed beside the Onyx/SC compromise."
+    },
+    {
+      "id": "PROC_EXEC_FROM_ACCOUNT_TMP_004",
+      "enabled": true,
+      "severity": "critical",
+      "confidence": "high",
+      "auto_kill": true,
+      "match": {
+        "exe_regex": "^/home/[A-Za-z0-9._-]+/tmp/[^/]+(?: \\(deleted\\))?$"
+      },
+      "description": "Process executable is running from a hosting account's writable ~/tmp directory."
     }
   ]
 }

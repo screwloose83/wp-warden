@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.61)
+## Scanner diagnostics and self-test (v0.1.62)
 
 The scanner reports PCRE failures as errors rather than treating them as clean
 no-matches. Slow diagnostics are opt-in by threshold (the defaults only print
@@ -137,8 +137,10 @@ The multi-site wrapper enables this guarded cleanup during its first cleanup pas
 
 On Linux, `--scan-processes` inspects `/proc` and reports matching processes
 owned by the same UID as the WordPress document root. Process intel includes
-randomly named PHP payloads running from `/home/ACCOUNT/tmp/php...` and locally
-launched fake Python binaries such as `./python3.6l`.
+randomly named PHP payloads running from `/home/ACCOUNT/tmp/php...`, locally
+launched fake Python binaries such as `./python3.6l` or `./python2.64`, and any
+resolved executable beneath `/tmp`, `/var/tmp`, `/dev/shm`, or
+`/home/ACCOUNT/tmp`.
 
 ```bash
 php wp-warden-pef.php /path/to/wordpress \
