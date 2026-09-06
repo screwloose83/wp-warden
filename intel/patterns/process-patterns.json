@@ -27,6 +27,28 @@
         "cmdline_regex": "(curl|wget).*(/tmp|/dev/shm|base64|sh\\s)"
       },
       "description": "Command line resembles downloader or shell staging activity."
+    },
+    {
+      "id": "PROC_PHP_RANDOM_HOME_TMP_002",
+      "enabled": true,
+      "severity": "critical",
+      "confidence": "high",
+      "auto_kill": true,
+      "match": {
+        "cmdline_regex": "(?:^|\\s)(?:/[^\\s]*/)?php[0-9.]*[^\\r\\n]{0,512}\\s+/home/[A-Za-z0-9._-]+/tmp/php[A-Za-z0-9_-]{6,}(?:\\s|$)"
+      },
+      "description": "PHP is executing a randomly named payload from a hosting account's writable ~/tmp directory."
+    },
+    {
+      "id": "PROC_FAKE_LOCAL_PYTHON_BINARY_003",
+      "enabled": true,
+      "severity": "critical",
+      "confidence": "high",
+      "auto_kill": true,
+      "match": {
+        "cmdline_regex": "(?:^|\\s)\\./python3\\.[0-9]+[A-Za-z](?:\\s|$)"
+      },
+      "description": "A locally executed binary mimics a Python version name with an extra trailing letter, a pattern observed beside the Onyx/SC compromise."
     }
   ]
 }

@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.60';
+const WP_WARDEN_VERSION = '0.1.61';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -80,6 +80,8 @@ $knownAdminsOverride = isset($opts['known-admins']) && is_string($opts['known-ad
 $cleanupMalwareUsersAuto = isset($opts['cleanup-malware-users-auto']);
 $cleanupDatabasePersistenceAuto = isset($opts['cleanup-database-persistence-auto']);
 $cleanupMalwareCronAuto = isset($opts['cleanup-malware-cron-auto']);
+$scanProcesses = isset($opts['scan-processes']) || isset($opts['kill-malicious-processes-auto']);
+$killMaliciousProcessesAuto = isset($opts['kill-malicious-processes-auto']);
 $promptUnknownAdmins = isset($opts['prompt-unknown-admins']);
 $excludePdf = isset($opts['exclude-pdf']);
 $vulnerabilityScan = isset($opts['vulnerability-scan']);
@@ -171,6 +173,14 @@ $state = [
         'usermeta_iocs' => [],
         'config_iocs' => [],
         'error' => null,
+    ],
+    'process_audit' => [
+        'enabled' => $scanProcesses,
+        'site_uid' => null,
+        'scanned' => 0,
+        'matched' => 0,
+        'terminated' => 0,
+        'errors' => [],
     ],
     'summary' => [
         'files_seen' => 0,
@@ -291,6 +301,13 @@ if ($cleanupMalwareCronAuto) {
         say("Mode:   confirmed malicious system cron cleanup enabled", true);
     }
 }
+if ($killMaliciousProcessesAuto) {
+    if (!$apply) {
+        say("WARN: --kill-malicious-processes-auto requires --apply; process termination is disabled", true);
+    } else {
+        say("Mode:   reviewed critical malicious process termination enabled", true);
+    }
+}
 if ($wpVersion) {
     say("WordPress: $wpVersion ($locale)", true);
 }
@@ -305,6 +322,10 @@ say("Auditing wp-config.php persistence...", true);
 audit_wp_config_persistence($wpRoot);
 say("Auditing system cron persistence...", true);
 audit_system_cron_persistence($wpRoot);
+if ($scanProcesses) {
+    say("Auditing processes owned by the WordPress site account...", true);
+    audit_site_processes($wpRoot, $intel);
+}
 say("Auditing symlinks...", true);
 audit_wordpress_symlinks($wpRoot, $intel);
 say("Scanning files...", true);
@@ -355,6 +376,8 @@ function print_help(): void {
     echo "  --cleanup-malware-users-auto Auto-remove only admins matching strong built-in malware-user IOCs; requires --apply\n";
     echo "  --cleanup-database-persistence-auto Remove confirmed wp-config/database/tmp persistence IOCs; requires --apply and --quarantine=DIR\n";
     echo "  --cleanup-malware-cron-auto Remove confirmed Base64 PHP-recreation jobs from the site owner's crontab; backs up the crontab and requires --apply and --quarantine=DIR\n";
+    echo "  --scan-processes         Report processes owned by the WordPress site account that match process intel\n";
+    echo "  --kill-malicious-processes-auto Terminate only reviewed CRITICAL process rules marked auto_kill; implies --scan-processes and requires --apply\n";
     echo "  --prompt-unknown-admins Prompt to remove unapproved/unverified admin users; requires --apply to delete\n";
     echo "  --no-db-audit           Skip WordPress administrator DB audit\n";
     echo "  --verify-all            Report files not matched by core checksum/baseline\n";
@@ -3029,6 +3052,34 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
     }
     $require($compiled > 0 && $invalid === 0, "enabled malware regexes compile ($compiled checked)");
 
+    $processDocument = json_file(rtrim($intelDir, '/') . '/patterns/process-patterns.json');
+    $processRulesById = [];
+    foreach (($processDocument['rules'] ?? []) as $processRule) {
+        if (is_array($processRule) && rule_enabled($processRule) && isset($processRule['id'])) {
+            $processRulesById[(string)$processRule['id']] = $processRule;
+        }
+    }
+    $processFixture = ['exe'=>'/usr/bin/php', 'cwd'=>'/home/example/tmp',
+        'cmdline'=>'php /home/example/tmp/phpbbMYJMyx phpbb'];
+    $pythonFixture = ['exe'=>'/home/example/tmp/python3.6l', 'cwd'=>'/home/example/tmp',
+        'cmdline'=>'./python3.6l'];
+    $require(isset($processRulesById['PROC_PHP_RANDOM_HOME_TMP_002'])
+        && process_rule_matches($processFixture, $processRulesById['PROC_PHP_RANDOM_HOME_TMP_002']),
+        'randomly named PHP payload in account tmp matches process intel');
+    $require(isset($processRulesById['PROC_FAKE_LOCAL_PYTHON_BINARY_003'])
+        && process_rule_matches($pythonFixture, $processRulesById['PROC_FAKE_LOCAL_PYTHON_BINARY_003']),
+        'fake local Python binary matches process intel');
+    $require(!process_rule_matches(
+        ['exe'=>'/usr/bin/php', 'cwd'=>'/home/example/public_html',
+            'cmdline'=>'php /home/example/public_html/wp-cron.php'],
+        $processRulesById['PROC_PHP_RANDOM_HOME_TMP_002'] ?? []
+    ), 'ordinary WordPress cron PHP process does not match tmp-payload intel');
+    $require(!process_rule_matches(
+        ['exe'=>'/usr/bin/python3.11', 'cwd'=>'/home/example/app',
+            'cmdline'=>'python3.11 manage.py'],
+        $processRulesById['PROC_FAKE_LOCAL_PYTHON_BINARY_003'] ?? []
+    ), 'ordinary Python process does not match fake-binary intel');
+
     $controlled = '~\beval\s*\(\s*base64_decode\s*\(~i';
     $dummy = null;
     $require(warden_preg_match($controlled, '<?php echo "hello";', $dummy, 0, 0, ['rule_id'=>'SELFTEST_CONTROLLED','path'=>'clean-fixture.php']) === 0,
@@ -4050,6 +4101,204 @@ function classify_scan_file(string $rel): string {
     if (in_array($ext, ['so', 'dll', 'exe', 'bin', 'dat', 'woff', 'woff2', 'ttf', 'otf', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf'], true)) return 'binary';
     if (in_array($ext, ['txt', 'md', 'log', 'xml', 'yml', 'yaml', 'ini', 'conf', 'htaccess'], true) || $ext === '') return 'text';
     return 'text';
+}
+
+function audit_site_processes(string $root, array $intel): void {
+    global $state, $apply, $killMaliciousProcessesAuto;
+
+    if (PHP_OS_FAMILY !== 'Linux' || !is_dir('/proc')) {
+        $state['process_audit']['errors'][] = 'Process audit requires Linux /proc.';
+        say('WARN: process audit requires Linux /proc', true);
+        return;
+    }
+
+    $siteUid = @fileowner($root);
+    if (!is_int($siteUid)) {
+        $state['process_audit']['errors'][] = 'Could not determine WordPress site owner UID.';
+        say('WARN: could not determine site owner UID; process audit skipped', true);
+        return;
+    }
+    $state['process_audit']['site_uid'] = $siteUid;
+
+    // A root-owned document root is not a safe account boundary. Report this and
+    // refuse process termination rather than treating every root process as in scope.
+    $allowKill = $killMaliciousProcessesAuto && $apply && $siteUid !== 0;
+    if ($killMaliciousProcessesAuto && $siteUid === 0) {
+        $state['process_audit']['errors'][] = 'Automatic process termination refused for UID 0.';
+        say('WARN: site root is owned by UID 0; malicious processes will be reported but not killed', true);
+    }
+
+    $rules = $intel['process_rules'] ?? [];
+    foreach (glob('/proc/[0-9]*', GLOB_ONLYDIR) ?: [] as $procDir) {
+        $pid = (int)basename($procDir);
+        if ($pid <= 1 || $pid === getmypid()) {
+            continue;
+        }
+        $process = read_linux_process($pid);
+        if ($process === null || $process['uid'] !== $siteUid || $process['cmdline'] === '') {
+            continue;
+        }
+        $state['process_audit']['scanned']++;
+
+        foreach ($rules as $rule) {
+            if (!process_rule_matches($process, $rule)) {
+                continue;
+            }
+            $state['process_audit']['matched']++;
+            $ruleId = (string)($rule['id'] ?? 'PROCESS_RULE');
+            $severity = strtolower((string)($rule['severity'] ?? 'medium'));
+            add_finding([
+                'severity' => $severity,
+                'type' => 'malicious_process',
+                'rule_id' => $ruleId,
+                'path' => $process['exe'],
+                'relative_path' => 'process:' . $pid,
+                'pid' => $pid,
+                'uid' => $siteUid,
+                'exe' => $process['exe'],
+                'cwd' => $process['cwd'],
+                'cmdline' => $process['cmdline'],
+                'reason' => $rule['description'] ?? 'Process matched malicious process intel.',
+                'recommended_action' => 'Terminate the process and quarantine its payload after verifying the account scope.',
+                'file_action' => false,
+            ]);
+
+            $reviewedAutoKill = !empty($rule['auto_kill']) && $severity === 'critical';
+            if ($allowKill && $reviewedAutoKill) {
+                terminate_validated_process($process, $ruleId);
+            }
+        }
+    }
+}
+
+function read_linux_process(int $pid): ?array {
+    $dir = '/proc/' . $pid;
+    $status = @file_get_contents($dir . '/status');
+    $stat = @file_get_contents($dir . '/stat');
+    if (!is_string($status) || !is_string($stat)
+        || !preg_match('/^Uid:\s+(\d+)/m', $status, $uidMatch)) {
+        return null;
+    }
+
+    $close = strrpos($stat, ')');
+    if ($close === false) {
+        return null;
+    }
+    $fields = preg_split('/\s+/', trim(substr($stat, $close + 1)));
+    // The split starts at proc field 3 (state), so index 19 is field 22/starttime.
+    if (!is_array($fields) || !isset($fields[19])) {
+        return null;
+    }
+
+    $rawCmdline = @file_get_contents($dir . '/cmdline');
+    $cmdline = is_string($rawCmdline)
+        ? trim(preg_replace('/\x00+/', ' ', $rawCmdline) ?? '')
+        : '';
+    if ($cmdline === '') {
+        $comm = @file_get_contents($dir . '/comm');
+        $cmdline = is_string($comm) ? trim($comm) : '';
+    }
+
+    return [
+        'pid' => $pid,
+        'uid' => (int)$uidMatch[1],
+        'state' => (string)$fields[0],
+        'start_time' => (string)$fields[19],
+        'cmdline' => $cmdline,
+        'exe' => normalize_path((string)(@readlink($dir . '/exe') ?: '')),
+        'cwd' => normalize_path((string)(@readlink($dir . '/cwd') ?: '')),
+    ];
+}
+
+function process_rule_matches(array $process, array $rule): bool {
+    $match = $rule['match'] ?? null;
+    if (!is_array($match) || $match === []) {
+        return false;
+    }
+
+    if (isset($match['cmdline_regex'])) {
+        $pattern = '~' . str_replace('~', '\\~', (string)$match['cmdline_regex']) . '~i';
+        if (@preg_match($pattern, (string)$process['cmdline']) !== 1) {
+            return false;
+        }
+    }
+    if (isset($match['exe_contains'])
+        && stripos((string)$process['exe'], (string)$match['exe_contains']) === false) {
+        return false;
+    }
+    if (isset($match['exe_prefixes'])) {
+        $prefixMatched = false;
+        foreach ((array)$match['exe_prefixes'] as $prefix) {
+            if (strpos((string)$process['exe'], (string)$prefix) === 0) {
+                $prefixMatched = true;
+                break;
+            }
+        }
+        if (!$prefixMatched) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function terminate_validated_process(array $original, string $ruleId): bool {
+    global $state;
+
+    $pid = (int)$original['pid'];
+    $current = read_linux_process($pid);
+    if ($current === null
+        || $current['uid'] !== $original['uid']
+        || $current['start_time'] !== $original['start_time']
+        || $current['cmdline'] !== $original['cmdline']) {
+        say("[PROCESS-KILL-SKIP] PID $pid changed or exited before validation", true);
+        return false;
+    }
+    if (!function_exists('posix_kill')) {
+        $state['process_audit']['errors'][] = 'PHP posix_kill() is unavailable.';
+        say("[PROCESS-KILL-FAIL] PHP posix_kill() is unavailable for PID $pid", true);
+        return false;
+    }
+
+    say("[PROCESS-TERM] PID $pid [$ruleId]: {$current['cmdline']}", true);
+    if (!@posix_kill($pid, 15)) {
+        say("[PROCESS-KILL-FAIL] Could not send SIGTERM to PID $pid", true);
+        return false;
+    }
+    usleep(500000);
+
+    $afterTerm = read_linux_process($pid);
+    $signal = 'SIGTERM';
+    if ($afterTerm !== null && $afterTerm['start_time'] === $original['start_time']
+        && $afterTerm['state'] !== 'Z') {
+        $signal = 'SIGKILL';
+        if (!@posix_kill($pid, 9)) {
+            say("[PROCESS-KILL-FAIL] Could not send SIGKILL to PID $pid", true);
+            return false;
+        }
+        usleep(200000);
+    }
+
+    $stillRunning = read_linux_process($pid);
+    if ($stillRunning !== null && $stillRunning['start_time'] === $original['start_time']
+        && $stillRunning['state'] !== 'Z') {
+        say("[PROCESS-KILL-FAIL] PID $pid is still present after $signal", true);
+        return false;
+    }
+
+    $state['actions'][] = [
+        'type' => 'terminate_process',
+        'pid' => $pid,
+        'uid' => $original['uid'],
+        'rule_id' => $ruleId,
+        'cmdline' => $original['cmdline'],
+        'path' => 'process:' . $pid,
+        'signal' => $signal,
+        'at' => gmdate('c'),
+    ];
+    $state['summary']['actions_taken']++;
+    $state['process_audit']['terminated']++;
+    say("[PROCESS-KILLED] PID $pid with $signal [$ruleId]", true);
+    return true;
 }
 
 function audit_wordpress_symlinks(string $root, array $intel): void {
@@ -7646,6 +7895,9 @@ function print_human_report(array $report, ?string $jsonPath): void {
             }
             if (!empty($finding['reason'])) {
                 echo "       why:  {$finding['reason']}" . PHP_EOL;
+            }
+            if (($finding['type'] ?? '') === 'malicious_process' && !empty($finding['cmdline'])) {
+                echo "       cmd:  " . shorten_text((string)$finding['cmdline'], 240) . PHP_EOL;
             }
             if ($shown >= 50) {
                 echo "  ... showing first 50 findings. Use --report-json for full details." . PHP_EOL;

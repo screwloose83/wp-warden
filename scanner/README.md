@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.60)
+## Scanner diagnostics and self-test (v0.1.61)
 
 The scanner reports PCRE failures as errors rather than treating them as clean
 no-matches. Slow diagnostics are opt-in by threshold (the defaults only print
@@ -132,6 +132,31 @@ php wp-warden-pef.php /path/to/wordpress \
 ```
 
 The multi-site wrapper enables this guarded cleanup during its first cleanup pass. The following verification pass audits the crontab again to confirm the persistence entry is gone.
+
+## Malicious Process Audit and Termination
+
+On Linux, `--scan-processes` inspects `/proc` and reports matching processes
+owned by the same UID as the WordPress document root. Process intel includes
+randomly named PHP payloads running from `/home/ACCOUNT/tmp/php...` and locally
+launched fake Python binaries such as `./python3.6l`.
+
+```bash
+php wp-warden-pef.php /path/to/wordpress \
+  --scan-processes \
+  --apply \
+  --kill-malicious-processes-auto
+```
+
+Automatic termination applies only to reviewed `critical` rules carrying an
+`auto_kill` flag. WP-Warden validates the PID, UID, command line, and Linux
+process start time immediately before signalling, sends `SIGTERM` first, and
+uses `SIGKILL` only if the same process remains. A UID-0 site root is always
+report-only. The multi-site wrapper enables the guarded process audit and
+termination during its cleanup pass.
+
+Killing a process does not remove its payload or persistence mechanism. Follow
+the reported executable/command path, quarantine the malicious file, and rerun
+the filesystem, cron, and database scans to ensure it does not respawn.
 
 ## Fetch Official Checksums
 
