@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.64';
+const WP_WARDEN_VERSION = '0.1.65';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
