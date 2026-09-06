@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.62)
+## Scanner diagnostics and self-test (v0.1.63)
 
 The scanner reports PCRE failures as errors rather than treating them as clean
 no-matches. Slow diagnostics are opt-in by threshold (the defaults only print
@@ -154,7 +154,10 @@ Automatic termination applies only to reviewed `critical` rules carrying an
 process start time immediately before signalling, sends `SIGTERM` first, and
 uses `SIGKILL` only if the same process remains. A UID-0 site root is always
 report-only. The multi-site wrapper enables the guarded process audit and
-termination during its cleanup pass.
+termination during its cleanup pass. This audit runs immediately after local
+intel is loaded—before checksum downloads, update checks, database audits, or
+filesystem scanning—so active malware cannot keep recreating files throughout
+the scan.
 
 Killing a process does not remove its payload or persistence mechanism. Follow
 the reported executable/command path, quarantine the malicious file, and rerun

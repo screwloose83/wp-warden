@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.62';
+const WP_WARDEN_VERSION = '0.1.63';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -207,6 +207,12 @@ $runStartedMicro = microtime(true);
 
 $intel = load_intel($intelDir, $policyId, $siteId);
 $wpRoot = realpath($target) ?: $target;
+if ($scanProcesses) {
+    $processStartedMicro = microtime(true);
+    say("[EARLY PROCESS AUDIT] Checking site-account processes before filesystem and database work...", true);
+    audit_site_processes($wpRoot, $intel);
+    $state['timing']['process_audit_seconds'] = round(microtime(true) - $processStartedMicro, 3);
+}
 $wpVersion = detect_wp_version($wpRoot);
 $locale = detect_wp_locale($wpRoot);
 $coreChecksums = load_core_checksums($intelDir, $wpVersion, $locale, $fetchOfficialChecksums);
@@ -322,10 +328,6 @@ say("Auditing wp-config.php persistence...", true);
 audit_wp_config_persistence($wpRoot);
 say("Auditing system cron persistence...", true);
 audit_system_cron_persistence($wpRoot);
-if ($scanProcesses) {
-    say("Auditing processes owned by the WordPress site account...", true);
-    audit_site_processes($wpRoot, $intel);
-}
 say("Auditing symlinks...", true);
 audit_wordpress_symlinks($wpRoot, $intel);
 say("Scanning files...", true);
