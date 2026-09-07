@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.68)
+## Scanner diagnostics and self-test (v0.1.69)
 
 The scanner reports PCRE failures as errors rather than treating them as clean
 no-matches. Slow diagnostics are opt-in by threshold (the defaults only print
@@ -132,6 +132,31 @@ php wp-warden-pef.php /path/to/wordpress \
 ```
 
 The multi-site wrapper enables this guarded cleanup during its first cleanup pass. The following verification pass audits the crontab again to confirm the persistence entry is gone.
+
+## SC/Onyx coordinated cleanup
+
+Version 0.1.69 adds guarded cleanup for the self-restoring SC/Onyx family. It
+recognizes the `SC_ADV_BEGIN`, `SC_DB_BEGIN`, `SCV`, `SCD1`, Aero Bridge Pad,
+and Onyx Wrapper Tap signatures and handles the confirmed layers together:
+
+```bash
+php wp-warden-pef.php /var/www/site \
+  --intel-dir=/root/wp-warden/wp-warden-intel \
+  --apply --quarantine=/var/lib/wp-warden/quarantine/site \
+  --quarantine-malware-auto --cleanup-sc-onyx-auto
+```
+
+It quarantines confirmed drop-ins, MU-plugin copies, hidden `.sc_*` cores,
+packed `.dat`/`.lkg` recovery files and matching recovery ZIPs. After content
+confirmation it also collects the family's empty lock markers. It removes the
+exact `40a11cf3de` option only when its decoded payload verifies as SC/Onyx,
+removes only tagged `.sc_tmp`/`SC_WC` wp-config directives, and deletes shared
+memory key `1929513302` only when its contents verify. Evidence is backed up
+before database, config, or shared-memory removal. The multi-site wrapper
+enables this mode automatically.
+
+Restart the affected PHP-FPM pool afterward to clear its separate OPcache; a
+CLI `opcache_reset()` cannot clear another process's cache.
 
 ## Malicious Process Audit and Termination
 

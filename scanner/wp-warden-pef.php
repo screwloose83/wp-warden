@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.68';
+const WP_WARDEN_VERSION = '0.1.69';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -80,6 +80,7 @@ $knownAdminsOverride = isset($opts['known-admins']) && is_string($opts['known-ad
     : null;
 $cleanupMalwareUsersAuto = isset($opts['cleanup-malware-users-auto']);
 $cleanupDatabasePersistenceAuto = isset($opts['cleanup-database-persistence-auto']);
+$cleanupScOnyxAuto = isset($opts['cleanup-sc-onyx-auto']);
 $cleanupMalwareCronAuto = isset($opts['cleanup-malware-cron-auto']);
 $processesOnly = isset($opts['processes-only']);
 $serverProcessesOnly = isset($opts['server-processes-only']);
@@ -188,6 +189,7 @@ $state = [
         'terminated' => 0,
         'errors' => [],
     ],
+    'sc_onyx_cleanup' => ['detected'=>0, 'quarantined'=>0, 'database_options_removed'=>0, 'shared_memory_removed'=>0, 'errors'=>[]],
     'summary' => [
         'files_seen' => 0,
         'files_scanned' => 0,
@@ -322,6 +324,13 @@ if ($cleanupDatabasePersistenceAuto) {
         say("Mode:   confirmed wp-config/database/tmp persistence cleanup enabled", true);
     }
 }
+if ($cleanupScOnyxAuto) {
+    if (!$apply || !$quarantineDir) {
+        say("WARN: --cleanup-sc-onyx-auto requires --apply and --quarantine=DIR; SC/Onyx cleanup is disabled", true);
+    } else {
+        say("Mode:   confirmed SC/Onyx coordinated cleanup enabled", true);
+    }
+}
 if ($cleanupMalwareCronAuto) {
     if (!$apply || !$quarantineDir) {
         say("WARN: --cleanup-malware-cron-auto requires --apply and --quarantine=DIR; system cron cleanup is disabled", true);
@@ -348,6 +357,8 @@ say("Auditing known malicious plugin directory names...", true);
 audit_malicious_plugin_directories($wpRoot);
 say("Auditing wp-config.php persistence...", true);
 audit_wp_config_persistence($wpRoot);
+say("Auditing SC/Onyx coordinated persistence...", true);
+audit_sc_onyx_persistence($wpRoot);
 say("Auditing system cron persistence...", true);
 audit_system_cron_persistence($wpRoot);
 say("Auditing symlinks...", true);
@@ -399,6 +410,7 @@ function print_help(): void {
     echo "  --known-admins=a,b      Comma-separated expected admin logins for DB audit\n";
     echo "  --cleanup-malware-users-auto Auto-remove only admins matching strong built-in malware-user IOCs; requires --apply\n";
     echo "  --cleanup-database-persistence-auto Remove confirmed wp-config/database/tmp persistence IOCs; requires --apply and --quarantine=DIR\n";
+    echo "  --cleanup-sc-onyx-auto Remove confirmed SC/Onyx files, database payload, shared memory, and wp-config injections; requires --apply and --quarantine=DIR\n";
     echo "  --cleanup-malware-cron-auto Remove confirmed Base64 PHP-recreation jobs from the site owner's crontab; backs up the crontab and requires --apply and --quarantine=DIR\n";
     echo "  --scan-processes         Report processes owned by the WordPress site account that match process intel\n";
     echo "  --processes-only         Run only the process audit, then print the report and exit\n";
@@ -914,10 +926,45 @@ function detect_suspicious_admin_user(array $entry): ?array {
 }
 
 function audit_database_persistence(mysqli $db, string $prefix): void {
-    global $state, $apply, $quarantineDir, $cleanupDatabasePersistenceAuto;
+    global $state, $apply, $quarantineDir, $cleanupDatabasePersistenceAuto, $cleanupScOnyxAuto;
 
     $optionsTable = "`{$prefix}options`";
     $metaTable = "`{$prefix}usermeta`";
+
+    // Confirmed Onyx/SC database recovery payload. The option name alone is not
+    // enough for deletion: decode and verify family markers first.
+    $res = @$db->query("SELECT option_id, option_name, option_value FROM {$optionsTable} WHERE option_name='40a11cf3de' LIMIT 10");
+    if ($res) {
+        while ($row = $res->fetch_assoc()) {
+            $optionId = (int)($row['option_id'] ?? 0);
+            $value = (string)($row['option_value'] ?? '');
+            $decoded = sc_onyx_decode_database_payload($value);
+            if ($decoded === null) continue;
+            $finding = [
+                'severity'=>'critical', 'type'=>'database_persistence', 'rule_id'=>'DB_SC_ONYX_RECOVERY_OPTION_001',
+                'path'=>'database', 'relative_path'=>'database:option/40a11cf3de',
+                'reason'=>'Database option contains a confirmed encoded SC/Onyx recovery payload.', 'file_action'=>false,
+                'recommended_action'=>'Back up and delete this option together with every SC/Onyx filesystem layer.'
+            ];
+            $state['db_audit']['option_iocs'][] = ['option_id'=>$optionId,'option_name'=>'40a11cf3de'];
+            $state['db_audit']['persistence_findings'][] = $finding;
+            add_finding($finding, false);
+            if (!$cleanupScOnyxAuto || !$apply || !$quarantineDir || $optionId < 1) continue;
+            $qRoot = rtrim(normalize_path($quarantineDir), '/') . '/sc-onyx-' . gmdate('Ymd-His');
+            if (!is_dir($qRoot) && !@mkdir($qRoot, 0700, true) && !is_dir($qRoot)) continue;
+            $backup = $qRoot . '/database-option-' . $optionId . '-40a11cf3de.json';
+            $json = json_encode(['option_id'=>$optionId,'option_name'=>'40a11cf3de','option_value_base64'=>base64_encode($value)], JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);
+            if (!is_string($json) || @file_put_contents($backup, $json, LOCK_EX) === false) continue;
+            @chmod($backup, 0600);
+            if (@$db->query("DELETE FROM {$optionsTable} WHERE option_id={$optionId} AND option_name='40a11cf3de' LIMIT 1")) {
+                $state['actions'][] = ['type'=>'delete_sc_onyx_database_option','option_id'=>$optionId,'option_name'=>'40a11cf3de','backup'=>$backup];
+                $state['summary']['actions_taken']++;
+                $state['sc_onyx_cleanup']['database_options_removed']++;
+                say("[SC-ONYX-CLEANED] Deleted confirmed database recovery option 40a11cf3de; backup: $backup", true);
+            }
+        }
+        $res->free();
+    }
 
     // 1) Active plugin inventory and known malicious persistence plugin names.
     $sql = "SELECT option_value FROM {$optionsTable} WHERE option_name='active_plugins' LIMIT 1";
@@ -3128,6 +3175,12 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
             'cmdline'=>'php /home/example/public_html/wp-content/plugins/security-cli/scan.php --sc-cli'],
         $processRulesById['PROC_PHP_SC_HIDDEN_PAYLOAD_005'] ?? []
     ), 'ordinary named PHP CLI path does not match hidden SC payload intel');
+    $require(sc_onyx_payload_matches('SCD1:4.3.24:' . str_repeat('a', 32) . ':H4sI' . str_repeat('A', 160)),
+        'SC/Onyx packed recovery payload is recognized');
+    $require(sc_onyx_payload_matches('<?php /* SCV:4.3.24 */ $x="onyx-wrapper-tap";'),
+        'SC/Onyx versioned wrapper payload is recognized');
+    $require(!sc_onyx_payload_matches('<?php /* ordinary cache plugin */'),
+        'ordinary PHP is not recognized as SC/Onyx persistence');
 
     $controlled = '~\beval\s*\(\s*base64_decode\s*\(~i';
     $dummy = null;
@@ -3741,6 +3794,193 @@ function audit_wp_config_persistence(string $root): void {
     ];
     $state['summary']['actions_taken']++;
     say("[CLEANED] Removed confirmed database-to-/tmp persistence loader from wp-config.php; backup: $backup", true);
+}
+
+function sc_onyx_payload_matches(string $data): bool {
+    if ($data === '') return false;
+    return strpos($data, 'SCD1:') === 0
+        || (stripos($data, 'onyx-wrapper-tap') !== false && stripos($data, 'SCV:') !== false)
+        || (stripos($data, 'Aero Bridge Pad') !== false && stripos($data, 'SC_CORE_BOOT_VER') !== false)
+        || (stripos($data, 'SC_ADV_BEGIN:') !== false && stripos($data, 'onyx-wrapper-tap') !== false)
+        || (stripos($data, 'SC_DB_BEGIN:') !== false && stripos($data, 'onyx-wrapper-tap') !== false);
+}
+
+function sc_onyx_decode_database_payload(string $value): ?string {
+    $candidates = [$value];
+    $b64 = base64_decode(trim($value), true);
+    if (is_string($b64) && $b64 !== '') $candidates[] = $b64;
+    foreach ($candidates as $candidate) {
+        if (strlen($candidate) > 2 * 1024 * 1024) continue;
+        if (sc_onyx_payload_matches($candidate)) return $candidate;
+        if (substr($candidate, 0, 2) === "\x1f\x8b" && function_exists('gzdecode')) {
+            $plain = @gzdecode($candidate, 2 * 1024 * 1024);
+            if (is_string($plain) && sc_onyx_payload_matches($plain)) return $plain;
+        }
+        if (warden_preg_match('/\ASCD1:\d+\.\d+\.\d+:[a-f0-9]{32}:(H4sI[A-Za-z0-9+\/=]+)/', $candidate, $m)) {
+            $packed = base64_decode($m[1], true);
+            $plain = is_string($packed) && function_exists('gzdecode') ? @gzdecode($packed, 2 * 1024 * 1024) : false;
+            if (is_string($plain) && sc_onyx_payload_matches($plain)) return $plain;
+        }
+    }
+    return null;
+}
+
+function sc_onyx_file_matches(string $path): bool {
+    if (!is_file($path) || is_link($path)) return false;
+    $size = @filesize($path);
+    if (!is_int($size) || $size < 1 || $size > 8 * 1024 * 1024) return false;
+    $data = @file_get_contents($path);
+    if (!is_string($data)) return false;
+    if (sc_onyx_payload_matches($data)) return true;
+    if (warden_preg_match('#(?:php_value\s+)?auto_prepend_file\s*(?:=\s*)?[\'\"][^\'\"\r\n]*/wp-content/(?:bac4a7ce|735e7808)\.php#i', $data) === 1) return true;
+    return stripos($data, 'onyx-wrapper-tap.php') !== false
+        && (stripos($data, '_sc_fpc') !== false || stripos($data, '.sd_onyx-wrapper-tap') !== false);
+}
+
+function sc_onyx_zip_matches(string $path): bool {
+    if (!class_exists('ZipArchive') || !is_file($path) || @filesize($path) > 16 * 1024 * 1024) return false;
+    $zip = new ZipArchive();
+    if (@$zip->open($path) !== true) return false;
+    $matched = false;
+    for ($i = 0; $i < $zip->numFiles && $i < 100; $i++) {
+        $name = (string)$zip->getNameIndex($i);
+        if (!warden_preg_match('#(?:^|/)onyx-wrapper-tap\.php$#i', $name)) continue;
+        $data = $zip->getFromIndex($i, 2 * 1024 * 1024);
+        if (is_string($data) && sc_onyx_payload_matches($data)) { $matched = true; break; }
+    }
+    $zip->close();
+    return $matched;
+}
+
+function quarantine_confirmed_sc_onyx_path(string $root, string $path, string $qRoot): bool {
+    global $state;
+    $root = rtrim(normalize_path($root), '/');
+    $path = normalize_path($path);
+    if (strpos($path, $root . '/') !== 0 || (!is_file($path) && !is_dir($path)) || is_link($path)) return false;
+    $rel = normalize_relative(substr($path, strlen($root) + 1));
+    if ($rel === '' || strpos($rel, '../') !== false) return false;
+    $dest = rtrim($qRoot, '/') . '/files/' . $rel;
+    if (file_exists($dest)) $dest .= '.quarantine-' . gmdate('Ymd-His') . '-' . getmypid();
+    if (!is_dir(dirname($dest)) && !@mkdir(dirname($dest), 0700, true) && !is_dir(dirname($dest))) return false;
+    if (!@rename($path, $dest)) return false;
+    $state['actions'][] = ['type'=>'quarantine_sc_onyx', 'relative_path'=>$rel, 'destination'=>$dest, 'at'=>gmdate('c')];
+    $state['summary']['actions_taken']++;
+    $state['sc_onyx_cleanup']['quarantined']++;
+    say("[SC-ONYX-QUARANTINED] $rel", true);
+    return true;
+}
+
+function audit_sc_onyx_persistence(string $root): void {
+    global $state, $apply, $quarantineDir, $cleanupScOnyxAuto;
+    $content = rtrim(normalize_path($root), '/') . '/wp-content';
+    if (!is_dir($content)) return;
+    $confirmed = [];
+    foreach (['advanced-cache.php','db.php','bac4a7ce.php','735e7808.php','.735e7808.php','.htaccess','.user.ini'] as $name) {
+        $path = $content . '/' . $name;
+        if (sc_onyx_file_matches($path)) $confirmed[$path] = true;
+    }
+    foreach ([$content . '/mu-plugins/onyx-wrapper-tap.php', $content . '/plugins/onyx-wrapper-tap/onyx-wrapper-tap.php'] as $path) {
+        if (sc_onyx_file_matches($path)) $confirmed[$path] = true;
+    }
+    foreach ((array)glob($content . '/.wp-object-cache-*.dat*') as $path) {
+        if (sc_onyx_file_matches($path)) $confirmed[$path] = true;
+    }
+    foreach ((array)glob($content . '/*.zip') as $path) {
+        if (sc_onyx_zip_matches($path)) $confirmed[$path] = true;
+    }
+    foreach ((array)glob($content . '/.sc_*') as $path) {
+        if (!is_dir($path) || is_link($path)) continue;
+        foreach ((array)glob($path . '/*') as $child) {
+            if (sc_onyx_file_matches($child)) { $confirmed[$path] = true; break; }
+        }
+    }
+    if (!$confirmed) {
+        // The disk copies may already have been removed while a verified
+        // database/shared-memory recovery layer survives. Check those guarded
+        // stores independently when explicit cleanup was requested.
+        if ($cleanupScOnyxAuto && $apply && $quarantineDir) {
+            $qRoot = rtrim(normalize_path($quarantineDir), '/') . '/sc-onyx-' . gmdate('Ymd-His');
+            if (is_dir($qRoot) || @mkdir($qRoot, 0700, true) || is_dir($qRoot)) {
+                cleanup_sc_onyx_wp_config($root, $qRoot);
+                cleanup_sc_onyx_shared_memory($qRoot);
+            }
+        }
+        return;
+    }
+
+    $state['sc_onyx_cleanup']['detected'] += count($confirmed);
+    foreach (array_keys($confirmed) as $path) {
+        add_finding([
+            'severity'=>'critical', 'type'=>'sc_onyx_persistence', 'rule_id'=>'BUILTIN_SC_ONYX_COORDINATED_001',
+            'path'=>$path, 'relative_path'=>normalize_relative(substr(normalize_path($path), strlen(rtrim(normalize_path($root), '/')) + 1)),
+            'reason'=>'Confirmed SC/Onyx self-restoring persistence component.', 'file_action'=>false,
+            'recommended_action'=>'Quarantine all confirmed SC/Onyx layers together and remove its database/shared-memory recovery payloads.'
+        ], false);
+    }
+    if (!$cleanupScOnyxAuto || !$apply || !$quarantineDir) return;
+    $qRoot = rtrim(normalize_path($quarantineDir), '/') . '/sc-onyx-' . gmdate('Ymd-His');
+    if (!is_dir($qRoot) && !@mkdir($qRoot, 0700, true) && !is_dir($qRoot)) {
+        $state['sc_onyx_cleanup']['errors'][] = 'Could not create SC/Onyx quarantine directory.';
+        return;
+    }
+
+    // Once the infection is content-confirmed, collect its otherwise-empty lock/state markers too.
+    foreach (['.kk_*','.sc_*','mu-plugins/.bt_onyx-wrapper-tap','mu-plugins/.sd_onyx-wrapper-tap','mu-plugins/.rd_onyx-wrapper-tap','mu-plugins/.q_onyx-wrapper-tap'] as $pattern) {
+        foreach ((array)glob($content . '/' . $pattern) as $path) $confirmed[$path] = true;
+    }
+    foreach (['bac4a7ce.php','735e7808.php','.735e7808.php'] as $name) {
+        $path = $content . '/' . $name;
+        if (is_file($path) && !is_link($path)) $confirmed[$path] = true;
+    }
+    foreach (array_keys($confirmed) as $path) quarantine_confirmed_sc_onyx_path($root, $path, $qRoot);
+    cleanup_sc_onyx_wp_config($root, $qRoot);
+    cleanup_sc_onyx_shared_memory($qRoot);
+    if (function_exists('opcache_reset')) @opcache_reset();
+}
+
+function cleanup_sc_onyx_wp_config(string $root, string $qRoot): void {
+    global $state;
+    $path = rtrim(normalize_path($root), '/') . '/wp-config.php';
+    $data = @file_get_contents($path);
+    if (!is_string($data)) return;
+    $clean = preg_replace([
+        '#^[ \t]*define\s*\(\s*[\'\"]WP_TEMP_DIR[\'\"]\s*,[^\r\n]*?/\.sc_tmp[^\r\n]*\);[^\r\n]*\R?#mi',
+        '#^[ \t]*define\s*\(\s*[\'\"]WP_CACHE[\'\"]\s*,\s*true\s*\)\s*;\s*/\*\s*SC_WC\s*\*/[^\r\n]*\R?#mi',
+    ], '', $data);
+    if (!is_string($clean) || $clean === $data) return;
+    $backup = $qRoot . '/wp-config.php.sc-onyx.infected';
+    if (!@copy($path, $backup)) { $state['sc_onyx_cleanup']['errors'][] = 'Could not back up SC/Onyx wp-config.php.'; return; }
+    @chmod($backup, 0600);
+    $tmp = $path . '.wp-warden-clean-' . getmypid();
+    $mode = @fileperms($path); $owner = @fileowner($path); $group = @filegroup($path);
+    if (@file_put_contents($tmp, $clean, LOCK_EX) === false) { @unlink($tmp); return; }
+    if (is_int($mode)) @chmod($tmp, $mode & 0777);
+    if (is_int($owner)) @chown($tmp, $owner);
+    if (is_int($group)) @chgrp($tmp, $group);
+    if (!@rename($tmp, $path)) { @unlink($tmp); return; }
+    $state['actions'][] = ['type'=>'cleanup_sc_onyx_wp_config','path'=>$path,'backup'=>$backup];
+    $state['summary']['actions_taken']++;
+    say('[SC-ONYX-CLEANED] Removed confirmed SC/Onyx wp-config.php directives', true);
+}
+
+function cleanup_sc_onyx_shared_memory(string $qRoot): void {
+    global $state;
+    if (!function_exists('shmop_open')) return;
+    $segment = @shmop_open(1929513302, 'a', 0, 0);
+    if (!$segment) return;
+    $size = @shmop_size($segment);
+    $data = (is_int($size) && $size > 0 && $size <= 2 * 1024 * 1024) ? @shmop_read($segment, 0, $size) : false;
+    if (!is_string($data) || !sc_onyx_payload_matches($data)) { @shmop_close($segment); return; }
+    $backup = $qRoot . '/shared-memory-1929513302.bin';
+    if (@file_put_contents($backup, $data, LOCK_EX) === false) { @shmop_close($segment); return; }
+    @chmod($backup, 0600);
+    if (@shmop_delete($segment)) {
+        $state['sc_onyx_cleanup']['shared_memory_removed']++;
+        $state['actions'][] = ['type'=>'delete_sc_onyx_shared_memory','key'=>1929513302,'backup'=>$backup];
+        $state['summary']['actions_taken']++;
+        say('[SC-ONYX-CLEANED] Deleted confirmed shared-memory recovery segment 1929513302', true);
+    }
+    @shmop_close($segment);
 }
 
 function audit_wp_content_directories(string $root): void {
@@ -5943,6 +6183,16 @@ function trusted_auto_quarantine_rule_ids(): array {
         'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
         'PHP_PWDYT_GOTO_STRREV_REMOTE_EVAL_001',
+        // Confirmed SC/Onyx family. These content-constrained signatures catch
+        // additional copies hidden under arbitrary filenames during the scan.
+        'PHP_SC_RESTORER_FAMILY_001',
+        'PHP_SC_HASHED_HIDDEN_INCLUDE_001',
+        'PHP_SC_SCD1_PACKED_CORE_001',
+        'PHP_SC_KNOWN_PREPEND_CONFIG_001',
+        'PHP_SC_OBFUSCATED_CORE_001',
+        'PHP_ONYX_WRAPPER_RESTORER_001',
+        'PHP_ONYX_AERO_BRIDGE_IMPLANT_001',
+        'PHP_ONYX_STATUS_BEACON_001',
     ];
 }
 
