@@ -62,6 +62,17 @@
         "exe_regex": "^/home/[A-Za-z0-9._-]+/tmp/[^/]+(?: \\(deleted\\))?$"
       },
       "description": "Process executable is running from a hosting account's writable ~/tmp directory."
+    },
+    {
+      "id": "PROC_PHP_SC_HIDDEN_PAYLOAD_005",
+      "enabled": true,
+      "severity": "critical",
+      "confidence": "high",
+      "auto_kill": true,
+      "match": {
+        "cmdline_regex": "(?:^|\\s)(?:/[^\\s]*/)?php[0-9.]*\\s+/home/[A-Za-z0-9._-]+/[^\\r\\n\\s]*/wp-content/\\.sc_[A-Fa-f0-9]{6,}/\\.gr_[A-Fa-f0-9]{16,}\\.php(?:\\s+[^\\r\\n]*)?--sc-cli(?:\\s|$)"
+      },
+      "description": "PHP is executing an SC compromise payload from a randomized hidden wp-content directory with the --sc-cli marker."
     }
   ]
 }
