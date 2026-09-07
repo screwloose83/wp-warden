@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.73)
+## Scanner diagnostics and self-test (v0.1.74)
 
 If the wrapper appears idle before a site header is printed, enable timestamped
 wrapper stages and detailed scanner progress:
@@ -174,6 +174,11 @@ The plugin directory identities `onyx-wrapper-tap` and `lumen-provider-run`
 are confirmed members of this family. They are classified as CRITICAL malware
 and their complete plugin directories are quarantined, so they no longer appear
 as ordinary unknown or private/custom update sources.
+
+After the database recovery option is removed, WP-Warden runs the coordinated
+SC/Onyx audit a second time. This final respawn sweep quarantines wrapper files
+or `.bt_onyx-wrapper-tap`/`.sd_onyx-wrapper-tap` markers recreated by a worker
+during the first scan pass.
 
 Restart the affected PHP-FPM pool afterward to clear its separate OPcache; a
 CLI `opcache_reset()` cannot clear another process's cache.

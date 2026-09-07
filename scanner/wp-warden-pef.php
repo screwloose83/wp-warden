@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.73';
+const WP_WARDEN_VERSION = '0.1.74';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -370,6 +370,10 @@ $state['timing']['file_scan_seconds'] = round(microtime(true) - $scanStartedMicr
 save_file_cache();
 say("File scan complete. Auditing WordPress admin users...", true);
 audit_wordpress_admins($wpRoot, $intel);
+if ($cleanupScOnyxAuto) {
+    say("Running final SC/Onyx respawn sweep after database cleanup...", true);
+    audit_sc_onyx_persistence($wpRoot);
+}
 install_wordpress_updates($wpRoot);
 say("Building report...", true);
 
