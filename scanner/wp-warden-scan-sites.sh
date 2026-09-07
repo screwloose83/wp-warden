@@ -2,7 +2,7 @@
 set -u
 set -o pipefail
 
-WRAPPER_VERSION="0.1.70"
+WRAPPER_VERSION="0.1.71"
 
 REPO_ROOT="${WP_WARDEN_REPO_ROOT:-/root/wp-warden}"
 INTEL_ROOT="${WP_WARDEN_INTEL_ROOT:-${REPO_ROOT}/wp-warden-intel}"
@@ -18,11 +18,20 @@ RUN_LOG_DIR="${LOG_ROOT}/${RUN_DATE}"
 RECENT_PHP_OPTION=""
 SITE_UPDATE_OPTIONS=()
 SITE_UPDATE_APPLY=()
+DEBUG=0
+DEBUG_START="$(date +%s)"
+DEBUG_SCANNER_OPTIONS=()
 RECOVER_MISSING_INTEL="${WP_WARDEN_RECOVER_MISSING_INTEL:-1}"
 mkdir -p "$RUN_LOG_DIR"
 
-usage(){ echo "Usage: $0 [--recent-php-days=N] [--update-core-auto] [--update-plugins-auto] [--update-themes-auto|--update-all-auto] (domain.com.au | --all) | --check-processes | --kill-processes-auto | --check-updates | --self-update"; exit 1; }
+usage(){ echo "Usage: $0 [--debug] [--recent-php-days=N] [--update-core-auto] [--update-plugins-auto] [--update-themes-auto|--update-all-auto] (domain.com.au | --all) | --check-processes | --kill-processes-auto | --check-updates | --self-update"; exit 1; }
 line(){ echo "======================================================================"; }
+debug(){
+    [ "$DEBUG" -eq 1 ] || return 0
+    local NOW
+    NOW=$(date +%s)
+    printf '[DEBUG +%ss %s] %s\n' "$((NOW-DEBUG_START))" "$(date '+%H:%M:%S')" "$*" >&2
+}
 scan_scope_label(){
     if [ -n "$RECENT_PHP_OPTION" ]; then
         echo "recent PHP quick sweep (${RECENT_PHP_OPTION#*=} day(s); incomplete scan)"
@@ -40,8 +49,14 @@ find_warden(){
 scanner_version_from_file(){
     sed -nE "s/^const WP_WARDEN_VERSION = ['\"]([^'\"]+)['\"];$/\1/p" "$1" 2>/dev/null | head -n 1
 }
-repo_git(){ (cd "$REPO_ROOT" && git "$@"); }
-fetch_main(){ repo_git fetch "$@" origin main:refs/remotes/origin/main; }
+repo_git(){ (cd "$REPO_ROOT" && GIT_TERMINAL_PROMPT=0 git "$@"); }
+fetch_main(){
+    if command -v timeout >/dev/null 2>&1; then
+        (cd "$REPO_ROOT" && GIT_TERMINAL_PROMPT=0 timeout 30s git -c http.connectTimeout=5 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 fetch "$@" origin main:refs/remotes/origin/main)
+    else
+        repo_git -c http.connectTimeout=5 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 fetch "$@" origin main:refs/remotes/origin/main
+    fi
+}
 github_scanner_file(){ repo_git ls-tree -r --name-only origin/main -- scanner/wp-warden-pef.php 2>/dev/null | head -n 1; }
 github_scanner_version(){ repo_git show "origin/main:$1" 2>/dev/null | sed -nE "s/^const WP_WARDEN_VERSION = ['\"]([^'\"]+)['\"];$/\1/p" | head -n 1; }
 site_root(){
@@ -128,7 +143,9 @@ cwp_root_from_domain_vhost(){
 
 resolve_requested_cwp_site(){
     local REQUESTED="$1" OWNER ROOT
+    debug "Direct resolution: checking CWP virtual-host files for $REQUESTED"
     ROOT="$(cwp_root_from_domain_vhost "$REQUESTED" || true)"
+    debug "Direct resolution: checking CWP domain-owner maps for $REQUESTED"
     OWNER="$(cwp_owner_for_domain "$REQUESTED" || true)"
 
     if [ -n "$ROOT" ]; then
@@ -229,10 +246,12 @@ check_updates(){
         echo "  [WARNING] Update check unavailable: ${REPO_ROOT} is not a Git checkout."
         return 0
     fi
+    debug "Update check: fetching origin/main"
     if ! fetch_main --quiet; then
         echo "  [WARNING] Update check failed; continuing with installed files."
         return 0
     fi
+    debug "Update check: fetch complete; comparing scanner and intel trees"
     printf '%s\n' "$NOW" > "$STATE_FILE"
 
     INSTALLED_SCANNER=$(find_warden)
@@ -253,6 +272,7 @@ check_updates(){
     fi
 
     for CATEGORY in patterns clean-zips checksums; do
+        debug "Update check: comparing intel/$CATEGORY"
         TMP=$(mktemp -d)
         SOURCE="${TMP}/intel/${CATEGORY}"
         TARGET="${INTEL_ROOT}/${CATEGORY}"
@@ -503,6 +523,7 @@ scan_site(){
  local PLATFORM="$1" SITE_ID="$2" SITE_ROOT="${3:-}" DOMAIN="${4:-}" QUARANTINE SITE_LOG REPORT CLEANUP_EXIT VERIFY_EXIT
  local CRITICAL=0 HIGH=0 MEDIUM=0 LOW=0 TOTAL=0 VULN_COUNT=0 VULN_STATUS=UNKNOWN RESULT_STATUS SITE_START SITE_END DISPLAY_ID
  SITE_START=$(date +%s)
+ debug "Resolving document root for platform=$PLATFORM site=$SITE_ID"
  SITE_ROOT="$(site_root "$PLATFORM" "$SITE_ID" "$SITE_ROOT")"
  if [ -z "${SITE_ROOT:-}" ]; then
    echo "[SKIP] $SITE_ID - WordPress root not found"
@@ -534,10 +555,12 @@ scan_site(){
  { line; echo " WP-Warden: $DISPLAY_ID"; echo " Started: $(date)"; echo " Platform: $PLATFORM"; echo " Site ID: $SITE_ID"; echo " Domain: ${DOMAIN:-unknown}"; echo " Site: $SITE_ROOT"; echo " Scope: $(scan_scope_label)"; echo " Quarantine: $QUARANTINE"; echo " JSON: $REPORT"; line; echo; echo ">>> PASS 1: VERIFY + SCAN + CLEANUP"; } | tee -a "$SITE_LOG"
  # Extra plugin/theme files are report-only by default. Premium/vendor checksum
  # sets can be incomplete, so their absence is not proof of malware.
- php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --cleanup-sc-onyx-auto --cleanup-malware-cron-auto --scan-processes --kill-malicious-processes-auto --quarantine-extra-core-auto --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --quarantine="$QUARANTINE" 2>&1 | tee -a "$SITE_LOG"
+ debug "Starting PHP scanner pass 1 for $DISPLAY_ID"
+ php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --cleanup-sc-onyx-auto --cleanup-malware-cron-auto --scan-processes --kill-malicious-processes-auto --quarantine-extra-core-auto --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --quarantine="$QUARANTINE" "${DEBUG_SCANNER_OPTIONS[@]}" 2>&1 | tee -a "$SITE_LOG"
  CLEANUP_EXIT=${PIPESTATUS[0]}
  { echo; echo ">>> PASS 1 EXIT CODE: $CLEANUP_EXIT"; echo ">>> PASS 2: POST-CLEANUP VERIFY (cache enabled, no checksum refetch)"; } | tee -a "$SITE_LOG"
- php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --vulnerability-scan --report-json="$REPORT" "${SITE_UPDATE_APPLY[@]}" "${SITE_UPDATE_OPTIONS[@]}" 2>&1 | tee -a "$SITE_LOG"
+ debug "Starting PHP scanner pass 2 for $DISPLAY_ID"
+ php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --vulnerability-scan --report-json="$REPORT" "${DEBUG_SCANNER_OPTIONS[@]}" "${SITE_UPDATE_APPLY[@]}" "${SITE_UPDATE_OPTIONS[@]}" 2>&1 | tee -a "$SITE_LOG"
  VERIFY_EXIT=${PIPESTATUS[0]}
  if [ -s "$REPORT" ] && command -v jq >/dev/null 2>&1; then
    CRITICAL=$(jq -r '.summary.critical // 0' "$REPORT"); HIGH=$(jq -r '.summary.high // 0' "$REPORT"); MEDIUM=$(jq -r '.summary.medium // 0' "$REPORT"); LOW=$(jq -r '.summary.low // 0' "$REPORT"); TOTAL=$(jq -r '.summary.findings_total // 0' "$REPORT")
@@ -576,6 +599,7 @@ discover_sites(){
     local d ROOT USER DOMAIN WWW_ROOT CANON_WWW CANON_ROOT WEB_NAME
     local -A SEEN_APISCP_ROOTS=()
 
+    debug "Discovery: enumerating ApisCP roots under $VIRTUAL_ROOT"
     {
 
     # ApisCP: discover the primary var/www/html site plus WordPress installs
@@ -615,6 +639,7 @@ discover_sites(){
     fi
 
     # CWP: /home/username/public_html
+    debug "Discovery: enumerating CWP roots under $CWP_HOME_ROOT" >&2
     for ROOT in "$CWP_HOME_ROOT"/*/public_html; do
         [ -f "$ROOT/wp-config.php" ] || continue
         USER="$(basename "$(dirname "$ROOT")")"
@@ -765,6 +790,10 @@ scan_all(){
 TARGET_ARG=""
 for ARG in "$@"; do
     case "$ARG" in
+        --debug)
+            DEBUG=1
+            DEBUG_SCANNER_OPTIONS=(--debug-progress)
+            ;;
         --recent-php-days=*)
             RECENT_PHP_DAYS="${ARG#*=}"
             [[ "$RECENT_PHP_DAYS" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --recent-php-days requires a positive integer"; exit 1; }
@@ -784,6 +813,8 @@ done
 set --
 [ -z "$TARGET_ARG" ] || set -- "$TARGET_ARG"
 
+debug "WP-Warden wrapper $WRAPPER_VERSION starting; target=${TARGET_ARG:-none}"
+
 if [ "${1:-}" = "--check-processes" ] || [ "${1:-}" = "--kill-processes-auto" ]; then
   WARDEN=$(find_warden)
   [ -f "$WARDEN" ] || { echo "ERROR: WP-Warden not found: $WARDEN"; exit 1; }
@@ -794,29 +825,33 @@ if [ "${1:-}" = "--check-processes" ] || [ "${1:-}" = "--kill-processes-auto" ];
   fi
   exit $?
 fi
+debug "Cleaning expired log directories"
 cleanup_old_logs
 if [ "${1:-}" = "--check-updates" ]; then check_updates 1; exit $?; fi
 if [ "${1:-}" = "--self-update" ]; then self_update; exit $?; fi
+debug "Checking for updates (network timeout: 30s; skipped when recently checked)"
 check_updates 0
+debug "Update check complete; locating scanner"
 WARDEN=$(find_warden)
 [ -f "$WARDEN" ] || { echo "ERROR: WP-Warden not found: $WARDEN"; exit 1; }
 [ $# -eq 1 ] || usage
 if [ "$1" = --all ]; then scan_all; exit $?; fi
 DOMAIN="${1,,}"; [[ "$DOMAIN" =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]] || { echo "ERROR: Invalid domain: $DOMAIN"; exit 1; }
 
-MATCH=""
-while IFS= read -r ENTRY; do
-    IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DISCOVERED_DOMAIN <<< "$ENTRY"
-    if [ "$DOMAIN" = "${DISCOVERED_DOMAIN,,}" ] || [ "$DOMAIN" = "${SITE_ID,,}" ]; then
-        MATCH="$ENTRY"
-        break
-    fi
-done < <(discover_sites)
-
+debug "Trying direct CWP resolution for $DOMAIN"
+MATCH="$(resolve_requested_cwp_site "$DOMAIN" || true)"
 if [ -z "$MATCH" ]; then
-    MATCH="$(resolve_requested_cwp_site "$DOMAIN" || true)"
+    debug "Direct CWP resolution missed; starting full ApisCP/CWP discovery"
+    while IFS= read -r ENTRY; do
+        IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DISCOVERED_DOMAIN <<< "$ENTRY"
+        if [ "$DOMAIN" = "${DISCOVERED_DOMAIN,,}" ] || [ "$DOMAIN" = "${SITE_ID,,}" ]; then
+            MATCH="$ENTRY"
+            break
+        fi
+    done < <(discover_sites)
 fi
 
 [ -n "$MATCH" ] || { echo "ERROR: WordPress site not found for: $DOMAIN"; exit 1; }
+debug "Resolved site entry: $MATCH"
 IFS='|' read -r PLATFORM SITE_ID SITE_ROOT DISCOVERED_DOMAIN <<< "$MATCH"
 scan_site "$PLATFORM" "$SITE_ID" "$SITE_ROOT" "$DISCOVERED_DOMAIN"; exit $?
