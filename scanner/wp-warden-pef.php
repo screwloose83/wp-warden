@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.76';
+const WP_WARDEN_VERSION = '0.1.77';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -6300,6 +6300,7 @@ function trusted_auto_quarantine_rule_ids(): array {
         'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
         'PHP_PWDYT_GOTO_STRREV_REMOTE_EVAL_001',
+        'PHP_GOTO_ESCAPED_DOUBLE_BASE64_EVAL_001',
         // Confirmed SC/Onyx family. These content-constrained signatures catch
         // additional copies hidden under arbitrary filenames during the scan.
         'PHP_SC_RESTORER_FAMILY_001',
