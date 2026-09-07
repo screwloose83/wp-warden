@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.78';
+const WP_WARDEN_VERSION = '0.1.79';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -8076,6 +8076,7 @@ function check_update_health(string $wpRoot, ?string $wpVersion, string $intelDi
         }
 
         $localNewer = local_component_versions('plugins', $slug, $installed);
+        $localExact = find_existing_local_clean_zip(local_clean_zip_candidates('plugins', $slug, $installed));
         $url='https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&request[slug]='.rawurlencode($slug);
         $d=cached_remote_json($intelDir,'plugin-'.$slug,$url,21600);
         $latest=$d['version'] ?? null;
@@ -8092,6 +8093,11 @@ function check_update_health(string $wpRoot, ?string $wpVersion, string $intelDi
             $result['plugins'][]=[
                 'slug'=>$slug,'installed'=>$installed,'latest'=>$localNewer[0],
                 'outdated'=>true,'source'=>'local-clean-zip'
+            ];
+        } elseif ($localExact) {
+            $result['plugins'][]=[
+                'slug'=>$slug,'installed'=>$installed,'latest'=>$installed,
+                'outdated'=>false,'source'=>'local-clean-zip','package'=>$localExact
             ];
         } else {
             $result['private_or_custom'][]=['type'=>'plugin','slug'=>$slug,'installed'=>$installed,'reason'=>'not found on wordpress.org and no newer trusted local package found'];
@@ -8110,6 +8116,7 @@ function check_update_health(string $wpRoot, ?string $wpVersion, string $intelDi
         }
 
         $localNewer = local_component_versions('themes', $slug, $installed);
+        $localExact = find_existing_local_clean_zip(local_clean_zip_candidates('themes', $slug, $installed));
         $url='https://api.wordpress.org/themes/info/1.2/?action=theme_information&request[slug]='.rawurlencode($slug);
         $d=cached_remote_json($intelDir,'theme-'.$slug,$url,21600);
         $latest=$d['version'] ?? null;
@@ -8126,6 +8133,11 @@ function check_update_health(string $wpRoot, ?string $wpVersion, string $intelDi
             $result['themes'][]=[
                 'slug'=>$slug,'installed'=>$installed,'latest'=>$localNewer[0],
                 'outdated'=>true,'source'=>'local-clean-zip'
+            ];
+        } elseif ($localExact) {
+            $result['themes'][]=[
+                'slug'=>$slug,'installed'=>$installed,'latest'=>$installed,
+                'outdated'=>false,'source'=>'local-clean-zip','package'=>$localExact
             ];
         } else {
             $result['private_or_custom'][]=['type'=>'theme','slug'=>$slug,'installed'=>$installed,'reason'=>'not found on wordpress.org and no newer trusted local package found'];
