@@ -2,7 +2,7 @@
 set -u
 set -o pipefail
 
-WRAPPER_VERSION="0.1.71"
+WRAPPER_VERSION="0.1.72"
 
 REPO_ROOT="${WP_WARDEN_REPO_ROOT:-/root/wp-warden}"
 INTEL_ROOT="${WP_WARDEN_INTEL_ROOT:-${REPO_ROOT}/wp-warden-intel}"
@@ -18,9 +18,9 @@ RUN_LOG_DIR="${LOG_ROOT}/${RUN_DATE}"
 RECENT_PHP_OPTION=""
 SITE_UPDATE_OPTIONS=()
 SITE_UPDATE_APPLY=()
+SITE_UPDATE_REQUESTED=0
 DEBUG=0
 DEBUG_START="$(date +%s)"
-DEBUG_SCANNER_OPTIONS=()
 RECOVER_MISSING_INTEL="${WP_WARDEN_RECOVER_MISSING_INTEL:-1}"
 mkdir -p "$RUN_LOG_DIR"
 
@@ -522,6 +522,7 @@ print_interactive_followup(){
 scan_site(){
  local PLATFORM="$1" SITE_ID="$2" SITE_ROOT="${3:-}" DOMAIN="${4:-}" QUARANTINE SITE_LOG REPORT CLEANUP_EXIT VERIFY_EXIT
  local CRITICAL=0 HIGH=0 MEDIUM=0 LOW=0 TOTAL=0 VULN_COUNT=0 VULN_STATUS=UNKNOWN RESULT_STATUS SITE_START SITE_END DISPLAY_ID
+ local -a PASS1_CMD PASS2_CMD
  SITE_START=$(date +%s)
  debug "Resolving document root for platform=$PLATFORM site=$SITE_ID"
  SITE_ROOT="$(site_root "$PLATFORM" "$SITE_ID" "$SITE_ROOT")"
@@ -556,11 +557,20 @@ scan_site(){
  # Extra plugin/theme files are report-only by default. Premium/vendor checksum
  # sets can be incomplete, so their absence is not proof of malware.
  debug "Starting PHP scanner pass 1 for $DISPLAY_ID"
- php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --cleanup-sc-onyx-auto --cleanup-malware-cron-auto --scan-processes --kill-malicious-processes-auto --quarantine-extra-core-auto --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --quarantine="$QUARANTINE" "${DEBUG_SCANNER_OPTIONS[@]}" 2>&1 | tee -a "$SITE_LOG"
+ PASS1_CMD=(php "$WARDEN" "$SITE_ROOT" "--intel-dir=$INTEL_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --cleanup-sc-onyx-auto --cleanup-malware-cron-auto --scan-processes --kill-malicious-processes-auto --quarantine-extra-core-auto --exclude-pdf --newest-first --max-size=1 --max-text-size=1 "--quarantine=$QUARANTINE")
+ [ -z "$RECENT_PHP_OPTION" ] || PASS1_CMD+=("$RECENT_PHP_OPTION")
+ [ "$DEBUG" -ne 1 ] || PASS1_CMD+=(--debug-progress)
+ "${PASS1_CMD[@]}" 2>&1 | tee -a "$SITE_LOG"
  CLEANUP_EXIT=${PIPESTATUS[0]}
  { echo; echo ">>> PASS 1 EXIT CODE: $CLEANUP_EXIT"; echo ">>> PASS 2: POST-CLEANUP VERIFY (cache enabled, no checksum refetch)"; } | tee -a "$SITE_LOG"
  debug "Starting PHP scanner pass 2 for $DISPLAY_ID"
- php "$WARDEN" "$SITE_ROOT" --intel-dir="$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first $RECENT_PHP_OPTION --max-size=1 --max-text-size=1 --vulnerability-scan --report-json="$REPORT" "${DEBUG_SCANNER_OPTIONS[@]}" "${SITE_UPDATE_APPLY[@]}" "${SITE_UPDATE_OPTIONS[@]}" 2>&1 | tee -a "$SITE_LOG"
+ PASS2_CMD=(php "$WARDEN" "$SITE_ROOT" "--intel-dir=$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first --max-size=1 --max-text-size=1 --vulnerability-scan "--report-json=$REPORT")
+ [ -z "$RECENT_PHP_OPTION" ] || PASS2_CMD+=("$RECENT_PHP_OPTION")
+ [ "$DEBUG" -ne 1 ] || PASS2_CMD+=(--debug-progress)
+ if [ "$SITE_UPDATE_REQUESTED" -eq 1 ]; then
+   PASS2_CMD+=("${SITE_UPDATE_APPLY[@]}" "${SITE_UPDATE_OPTIONS[@]}")
+ fi
+ "${PASS2_CMD[@]}" 2>&1 | tee -a "$SITE_LOG"
  VERIFY_EXIT=${PIPESTATUS[0]}
  if [ -s "$REPORT" ] && command -v jq >/dev/null 2>&1; then
    CRITICAL=$(jq -r '.summary.critical // 0' "$REPORT"); HIGH=$(jq -r '.summary.high // 0' "$REPORT"); MEDIUM=$(jq -r '.summary.medium // 0' "$REPORT"); LOW=$(jq -r '.summary.low // 0' "$REPORT"); TOTAL=$(jq -r '.summary.findings_total // 0' "$REPORT")
@@ -792,7 +802,6 @@ for ARG in "$@"; do
     case "$ARG" in
         --debug)
             DEBUG=1
-            DEBUG_SCANNER_OPTIONS=(--debug-progress)
             ;;
         --recent-php-days=*)
             RECENT_PHP_DAYS="${ARG#*=}"
@@ -803,6 +812,7 @@ for ARG in "$@"; do
         --update-core-auto|--update-plugins-auto|--update-themes-auto|--update-all-auto)
             SITE_UPDATE_OPTIONS+=("$ARG")
             SITE_UPDATE_APPLY=(--apply)
+            SITE_UPDATE_REQUESTED=1
             ;;
         *)
             [ -z "$TARGET_ARG" ] || usage

@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.71';
+const WP_WARDEN_VERSION = '0.1.72';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -3210,6 +3210,11 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
         $require(($ioc['rule_id'] ?? null) === $expectedRuleId,
             "randomized plugin IOC detected: $slug");
     }
+    foreach (['onyx-wrapper-tap', 'lumen-provider-run'] as $slug) {
+        $ioc = malicious_plugin_slug_ioc($slug);
+        $require(is_array($ioc) && ($ioc['rule_id'] ?? '') === 'BUILTIN_SC_ONYX_PLUGIN_DIR_001',
+            "confirmed SC/Onyx plugin IOC detected: $slug");
+    }
     $comparison = compare_checksum_maps(
         ['same.php'=>['sha256'=>str_repeat('a', 64)], 'api-only.pot'=>['md5'=>str_repeat('b', 32)], 'different.php'=>['md5'=>str_repeat('c', 32)]],
         ['same.php'=>['sha256'=>str_repeat('a', 64)], 'zip-only.txt'=>['md5'=>str_repeat('d', 32)], 'different.php'=>['md5'=>str_repeat('e', 32)]]
@@ -4179,6 +4184,12 @@ function audit_malicious_plugin_directories(string $root): void {
 }
 
 function malicious_plugin_slug_ioc(string $slug): ?array {
+    if (in_array(strtolower($slug), ['onyx-wrapper-tap', 'lumen-provider-run'], true)) {
+        return [
+            'rule_id' => 'BUILTIN_SC_ONYX_PLUGIN_DIR_001',
+            'family' => 'SC/Onyx self-restoring persistence',
+        ];
+    }
     if (warden_preg_match('/^wp2shell-[a-f0-9]{6,64}$/i', $slug) === 1) {
         return [
             'rule_id' => 'BUILTIN_WP2SHELL_PLUGIN_DIR_001',
@@ -6262,6 +6273,7 @@ function maybe_auto_quarantine_malware_finding(array $finding): bool {
         'BUILTIN_WP2SHELL_PLUGIN_DIR_001',
         'BUILTIN_GALEX_WEBSHELL_PLUGIN_DIR_001',
         'BUILTIN_RANDOMIZED_PROTECT_UPLOADS_PLUGIN_001',
+        'BUILTIN_SC_ONYX_PLUGIN_DIR_001',
     ], true)) {
         $finding['id'] = finding_id($finding);
         say(
