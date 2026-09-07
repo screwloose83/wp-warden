@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.75';
+const WP_WARDEN_VERSION = '0.1.76';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -189,7 +189,7 @@ $state = [
         'terminated' => 0,
         'errors' => [],
     ],
-    'sc_onyx_cleanup' => ['detected'=>0, 'quarantined'=>0, 'database_options_removed'=>0, 'shared_memory_removed'=>0, 'errors'=>[]],
+    'sc_onyx_cleanup' => ['detected'=>0, 'quarantined'=>0, 'tagged_blocks_removed'=>0, 'database_options_removed'=>0, 'shared_memory_removed'=>0, 'errors'=>[]],
     'summary' => [
         'files_seen' => 0,
         'files_scanned' => 0,
@@ -3871,6 +3871,73 @@ function sc_onyx_file_matches(string $path): bool {
         && (stripos($data, '_sc_fpc') !== false || stripos($data, '.sd_onyx-wrapper-tap') !== false);
 }
 
+function find_sc_onyx_tagged_php_carriers(string $root): array {
+    $found = [];
+    try {
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+        foreach ($iterator as $file) {
+            if (!$file->isFile() || $file->isLink() || strtolower($file->getExtension()) !== 'php') continue;
+            $size = $file->getSize();
+            if ($size < 1 || $size > 8 * 1024 * 1024) continue;
+            $path = normalize_path($file->getPathname());
+            $data = @file_get_contents($path);
+            if (!is_string($data)) continue;
+            if (warden_preg_match('#/\*\s*SC_TH_BEGIN:\d+\.\d+\.\d+:[a-f0-9]{8}\s*\*/#i', $data) !== 1) continue;
+            if (stripos($data, 'onyx-wrapper-tap') === false || stripos($data, '_sc_fpc') === false) continue;
+            if (warden_preg_match('#/\*\s*SC_TH_END:\d+\.\d+\.\d+:[a-f0-9]{8}\s*\*/#i', $data) !== 1) continue;
+            $found[$path] = true;
+        }
+    } catch (Throwable $e) {
+        // Unreadable paths are handled by the normal file scanner.
+    }
+    return array_keys($found);
+}
+
+function cleanup_sc_onyx_tagged_php_carrier(string $root, string $path, string $qRoot): bool {
+    global $state;
+    $root = rtrim(normalize_path($root), '/');
+    $path = normalize_path($path);
+    if (strpos($path, $root . '/') !== 0 || !is_file($path) || is_link($path)) return false;
+    $data = @file_get_contents($path);
+    if (!is_string($data) || stripos($data, 'onyx-wrapper-tap') === false || stripos($data, '_sc_fpc') === false) return false;
+    $removed = 0;
+    $clean = preg_replace_callback(
+        '#(?:\r?\n)?/\*\s*SC_TH_BEGIN:(\d+\.\d+\.\d+):([a-f0-9]{8})\s*\*/[\s\S]*?/\*\s*SC_TH_END:\\1:\\2\s*\*/(?:\r?\n)?#i',
+        static function (array $match) use (&$removed): string {
+            if (stripos($match[0], 'onyx-wrapper-tap') === false || stripos($match[0], '_sc_fpc') === false) return $match[0];
+            $removed++;
+            return "\n";
+        },
+        $data
+    );
+    if (!is_string($clean) || $removed < 1 || $clean === $data) return false;
+
+    $rel = normalize_relative(substr($path, strlen($root) + 1));
+    if ($rel === '' || strpos($rel, '../') !== false) return false;
+    $backup = rtrim($qRoot, '/') . '/tagged-carriers/' . $rel . '.infected';
+    if (!is_dir(dirname($backup)) && !@mkdir(dirname($backup), 0700, true) && !is_dir(dirname($backup))) return false;
+    if (!@copy($path, $backup)) return false;
+    @chmod($backup, 0600);
+
+    $tmp = $path . '.wp-warden-clean-' . getmypid();
+    $mode = @fileperms($path); $owner = @fileowner($path); $group = @filegroup($path);
+    if (@file_put_contents($tmp, $clean, LOCK_EX) === false) { @unlink($tmp); return false; }
+    if (is_int($mode)) @chmod($tmp, $mode & 0777);
+    if (is_int($owner)) @chown($tmp, $owner);
+    if (is_int($group)) @chgrp($tmp, $group);
+    if (!@rename($tmp, $path)) { @unlink($tmp); return false; }
+    if (function_exists('opcache_invalidate')) @opcache_invalidate($path, true);
+
+    $state['actions'][] = ['type'=>'clean_sc_onyx_tagged_php_carrier','relative_path'=>$rel,'backup'=>$backup,'blocks_removed'=>$removed];
+    $state['summary']['actions_taken']++;
+    $state['sc_onyx_cleanup']['tagged_blocks_removed'] += $removed;
+    say("[SC-ONYX-CLEANED] Removed $removed tagged Onyx restorer block(s) from $rel; backup: $backup", true);
+    return true;
+}
+
 function sc_onyx_zip_matches(string $path): bool {
     if (!class_exists('ZipArchive') || !is_file($path) || @filesize($path) > 16 * 1024 * 1024) return false;
     $zip = new ZipArchive();
@@ -3909,6 +3976,7 @@ function audit_sc_onyx_persistence(string $root): void {
     $content = rtrim(normalize_path($root), '/') . '/wp-content';
     if (!is_dir($content)) return;
     $confirmed = [];
+    $taggedCarriers = find_sc_onyx_tagged_php_carriers($root);
     foreach (['advanced-cache.php','db.php','bac4a7ce.php','735e7808.php','.735e7808.php','.htaccess','.user.ini'] as $name) {
         $path = $content . '/' . $name;
         if (sc_onyx_file_matches($path)) $confirmed[$path] = true;
@@ -3928,7 +3996,7 @@ function audit_sc_onyx_persistence(string $root): void {
             if (sc_onyx_file_matches($child)) { $confirmed[$path] = true; break; }
         }
     }
-    if (!$confirmed) {
+    if (!$confirmed && !$taggedCarriers) {
         // The disk copies may already have been removed while a verified
         // database/shared-memory recovery layer survives. Check those guarded
         // stores independently when explicit cleanup was requested.
@@ -3942,13 +4010,21 @@ function audit_sc_onyx_persistence(string $root): void {
         return;
     }
 
-    $state['sc_onyx_cleanup']['detected'] += count($confirmed);
+    $state['sc_onyx_cleanup']['detected'] += count($confirmed) + count($taggedCarriers);
     foreach (array_keys($confirmed) as $path) {
         add_finding([
             'severity'=>'critical', 'type'=>'sc_onyx_persistence', 'rule_id'=>'BUILTIN_SC_ONYX_COORDINATED_001',
             'path'=>$path, 'relative_path'=>normalize_relative(substr(normalize_path($path), strlen(rtrim(normalize_path($root), '/')) + 1)),
             'reason'=>'Confirmed SC/Onyx self-restoring persistence component.', 'file_action'=>false,
             'recommended_action'=>'Quarantine all confirmed SC/Onyx layers together and remove its database/shared-memory recovery payloads.'
+        ], false);
+    }
+    foreach ($taggedCarriers as $path) {
+        add_finding([
+            'severity'=>'critical', 'type'=>'sc_onyx_tagged_php_carrier', 'rule_id'=>'BUILTIN_SC_ONYX_TAGGED_CARRIER_002',
+            'path'=>$path, 'relative_path'=>normalize_relative(substr(normalize_path($path), strlen(rtrim(normalize_path($root), '/')) + 1)),
+            'reason'=>'Legitimate PHP file contains a complete SC_TH-tagged Onyx self-restoring loader block.', 'file_action'=>false,
+            'recommended_action'=>'Back up the file and remove only the matched SC_TH_BEGIN/SC_TH_END block.'
         ], false);
     }
     if (!$cleanupScOnyxAuto || !$apply || !$quarantineDir) return;
@@ -3966,6 +4042,7 @@ function audit_sc_onyx_persistence(string $root): void {
         $path = $content . '/' . $name;
         if (is_file($path) && !is_link($path)) $confirmed[$path] = true;
     }
+    foreach ($taggedCarriers as $path) cleanup_sc_onyx_tagged_php_carrier($root, $path, $qRoot);
     foreach (array_keys($confirmed) as $path) quarantine_confirmed_sc_onyx_path($root, $path, $qRoot);
     cleanup_sc_onyx_wp_config($root, $qRoot);
     cleanup_sc_onyx_shared_memory($qRoot);
