@@ -84,6 +84,17 @@
         "cmdline_regex": "(?:^|\\s)(?:/[^\\s]*/)?php[0-9.]*\\s+/home/[A-Za-z0-9._-]+/[^\\r\\n\\s]*/wp-content/br[A-Fa-f0-9]{6}/[A-Fa-f0-9]{8}(?:\\s|$)"
       },
       "description": "PHP is executing an extensionless eight-hex payload from a randomized wp-content/br<hex> directory."
+    },
+    {
+      "id": "PROC_PHP_RANDOM_IM_PAYLOAD_007",
+      "enabled": true,
+      "severity": "critical",
+      "confidence": "high",
+      "auto_kill": true,
+      "match": {
+        "cmdline_regex": "(?:^|\\s)(?:/[^\\s]*/)?php[0-9.]*\\s+/home/[A-Za-z0-9._-]+/[^\\r\\n\\s]*/wp-content/im[0-9]{6}/[A-Fa-f0-9]{7,8}(?:\\s|$)"
+      },
+      "description": "PHP is executing an extensionless seven- or eight-hex payload from a randomized wp-content/im<digits> directory."
     }
   ]
 }

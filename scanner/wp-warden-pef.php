@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.74';
+const WP_WARDEN_VERSION = '0.1.75';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -3149,6 +3149,8 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
         'cmdline'=>'/opt/alt/php-fpm83/usr/bin/php /home/example/public_html/wp-content/.sc_edbf7b8b/.gr_d76d67857178739e7652c924d4464062.php --sc-cli'];
     $brPayloadFixture = ['exe'=>'/usr/bin/php', 'cwd'=>'/home/example/public_html',
         'cmdline'=>'php /home/example/public_html/wp-content/br6d0036/9442f061'];
+    $imPayloadFixture = ['exe'=>'/usr/bin/php', 'cwd'=>'/home/example/public_html',
+        'cmdline'=>'php /home/example/public_html/wp-content/im189508/44258c3'];
     $require(isset($processRulesById['PROC_PHP_RANDOM_HOME_TMP_002'])
         && process_rule_matches($processFixture, $processRulesById['PROC_PHP_RANDOM_HOME_TMP_002']),
         'randomly named PHP payload in account tmp matches process intel');
@@ -3166,6 +3168,9 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
     $require(isset($processRulesById['PROC_PHP_RANDOM_BR_PAYLOAD_006'])
         && process_rule_matches($brPayloadFixture, $processRulesById['PROC_PHP_RANDOM_BR_PAYLOAD_006']),
         'extensionless randomized br payload matches process intel');
+    $require(isset($processRulesById['PROC_PHP_RANDOM_IM_PAYLOAD_007'])
+        && process_rule_matches($imPayloadFixture, $processRulesById['PROC_PHP_RANDOM_IM_PAYLOAD_007']),
+        'extensionless randomized im payload matches process intel');
     $require(process_rule_matches(
         ['exe'=>'/tmp/random-worker', 'cwd'=>'/tmp', 'cmdline'=>'/tmp/random-worker'],
         $processRulesById['PROC_EXEC_FROM_TMP_001'] ?? []
@@ -3190,6 +3195,11 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
             'cmdline'=>'php /home/example/public_html/wp-content/plugins/cache/worker.php'],
         $processRulesById['PROC_PHP_RANDOM_BR_PAYLOAD_006'] ?? []
     ), 'ordinary plugin PHP worker does not match randomized br payload intel');
+    $require(!process_rule_matches(
+        ['exe'=>'/usr/bin/php', 'cwd'=>'/home/example/public_html',
+            'cmdline'=>'php /home/example/public_html/wp-content/imports/44258c3.php'],
+        $processRulesById['PROC_PHP_RANDOM_IM_PAYLOAD_007'] ?? []
+    ), 'ordinary PHP import worker does not match randomized im payload intel');
     $require(sc_onyx_payload_matches('SCD1:4.3.24:' . str_repeat('a', 32) . ':H4sI' . str_repeat('A', 160)),
         'SC/Onyx packed recovery payload is recognized');
     $require(sc_onyx_payload_matches('<?php /* SCV:4.3.24 */ $x="onyx-wrapper-tap";'),

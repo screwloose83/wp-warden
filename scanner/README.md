@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.74)
+## Scanner diagnostics and self-test (v0.1.75)
 
 If the wrapper appears idle before a site header is printed, enable timestamped
 wrapper stages and detailed scanner progress:
