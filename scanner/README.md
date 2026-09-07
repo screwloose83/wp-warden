@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.69)
+## Scanner diagnostics and self-test (v0.1.70)
 
 The scanner reports PCRE failures as errors rather than treating them as clean
 no-matches. Slow diagnostics are opt-in by threshold (the defaults only print

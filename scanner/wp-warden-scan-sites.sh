@@ -2,7 +2,7 @@
 set -u
 set -o pipefail
 
-WRAPPER_VERSION="0.1.69"
+WRAPPER_VERSION="0.1.70"
 
 REPO_ROOT="${WP_WARDEN_REPO_ROOT:-/root/wp-warden}"
 INTEL_ROOT="${WP_WARDEN_INTEL_ROOT:-${REPO_ROOT}/wp-warden-intel}"
