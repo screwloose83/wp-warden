@@ -95,6 +95,17 @@
         "cmdline_regex": "(?:^|\\s)(?:/[^\\s]*/)?php[0-9.]*\\s+/home/[A-Za-z0-9._-]+/[^\\r\\n\\s]*/wp-content/im[0-9]{6}/[A-Fa-f0-9]{7,8}(?:\\s|$)"
       },
       "description": "PHP is executing an extensionless seven- or eight-hex payload from a randomized wp-content/im<digits> directory."
+    },
+    {
+      "id": "PROC_BASH_TMP_PHP_RESPAWNER_008",
+      "enabled": true,
+      "severity": "critical",
+      "confidence": "high",
+      "auto_kill": true,
+      "match": {
+        "cmdline_regex": "(?:^|\\s)(?:/[^\\s]*/)?(?:ba)?sh\\s+-c\\s+while\\s+(?:true|:)\\s*;\\s*do[\\s\\S]{0,400}\\[\\s+-f\\s+/tmp/wp-cron-[A-Za-z0-9_-]{4,}\\.php\\s*\\][\\s\\S]{0,400}\\|\\|\\s*echo\\s+(?:['\"])?PD9waHA[A-Za-z0-9+/]{72,}"
+      },
+      "description": "A persistent shell loop recreates a randomized /tmp/wp-cron-*.php payload from embedded Base64 whenever the file is removed."
     }
   ]
 }
