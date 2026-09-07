@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.72';
+const WP_WARDEN_VERSION = '0.1.73';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -3054,9 +3054,10 @@ function compare_checksum_maps(array $apiMap, array $zipMap): array {
 function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
     global $state, $quiet, $slowRuleMs, $slowFileMs, $scanRuntime, $apply,
            $interactive, $nonInteractive, $quarantineDir, $quarantineMalwareAuto,
-           $handledInteractivePaths;
+           $handledInteractivePaths, $debugProgress;
 
     $quiet = false;
+    $debugProgress = false;
     $slowRuleMs = $slowRuleThresholdMs;
     $slowFileMs = 1000;
     $apply = false;
@@ -3489,7 +3490,7 @@ function pcre_error_message(int $code): string {
 }
 
 function record_regex_timing(float $elapsedMs, array $context): void {
-    global $state, $slowRuleMs;
+    global $state, $slowRuleMs, $debugProgress;
     $ruleId = (string)($context['rule_id'] ?? '');
     if ($ruleId === '' || !isset($state['timing'])) {
         return;
@@ -3505,19 +3506,21 @@ function record_regex_timing(float $elapsedMs, array $context): void {
     }
     if ($slowRuleMs > 0 && $elapsedMs >= $slowRuleMs) {
         $state['timing']['slow_rules'] = (int)($state['timing']['slow_rules'] ?? 0) + 1;
-        say(sprintf('[SLOW-RULE] %dms %s %s', (int)round($elapsedMs), $ruleId, $path), true);
+        if ($debugProgress) {
+            say(sprintf('[SLOW-RULE] %dms %s %s', (int)round($elapsedMs), $ruleId, $path), true);
+        }
     }
 }
 
 function record_slow_stage(float $elapsedMs, string $stage, string $path): void {
-    global $slowFileMs;
-    if ($slowFileMs > 0 && $elapsedMs >= $slowFileMs) {
+    global $slowFileMs, $debugProgress;
+    if ($debugProgress && $slowFileMs > 0 && $elapsedMs >= $slowFileMs) {
         say(sprintf('[SLOW-STAGE] %.2fs %s %s', $elapsedMs / 1000, $stage, $path), true);
     }
 }
 
 function record_file_timing(float $elapsedMs, string $path): void {
-    global $state, $slowFileMs;
+    global $state, $slowFileMs, $debugProgress;
     $slowest = $state['timing']['slowest_file'] ?? null;
     if (!is_array($slowest) || $elapsedMs > (float)($slowest['milliseconds'] ?? -1)) {
         $state['timing']['slowest_file'] = [
@@ -3527,7 +3530,9 @@ function record_file_timing(float $elapsedMs, string $path): void {
     }
     if ($slowFileMs > 0 && $elapsedMs >= $slowFileMs) {
         $state['timing']['slow_files'] = (int)($state['timing']['slow_files'] ?? 0) + 1;
-        say(sprintf('[SLOW-FILE] %.2fs %s', $elapsedMs / 1000, $path), true);
+        if ($debugProgress) {
+            say(sprintf('[SLOW-FILE] %.2fs %s', $elapsedMs / 1000, $path), true);
+        }
     }
 }
 

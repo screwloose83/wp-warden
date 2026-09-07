@@ -15,7 +15,7 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
-## Scanner diagnostics and self-test (v0.1.72)
+## Scanner diagnostics and self-test (v0.1.73)
 
 If the wrapper appears idle before a site header is printed, enable timestamped
 wrapper stages and detailed scanner progress:
@@ -28,6 +28,9 @@ Debug output identifies update fetching, direct CWP resolution, full hosting
 enumeration, document-root resolution, and both scanner passes. Update fetching
 is noninteractive and bounded to 30 seconds. A requested CWP domain is resolved
 directly before the more expensive server-wide discovery fallback.
+
+Slow-rule, slow-stage, and slow-file events remain counted in timing reports,
+but their live `[SLOW-*]` messages are shown only in this debug mode.
 
 The scanner reports PCRE failures as errors rather than treating them as clean
 no-matches. Slow diagnostics are opt-in by threshold (the defaults only print
