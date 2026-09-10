@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.80';
+const WP_WARDEN_VERSION = '0.1.81';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -7446,11 +7446,23 @@ function stream_http_to_file_with_status(
 
 function command_exists(string $command): bool {
     static $cache = [];
+    static $warnedExecUnavailable = false;
     if (array_key_exists($command, $cache)) {
         return $cache[$command];
     }
-    $path = @shell_exec('command -v ' . escapeshellarg($command) . ' 2>/dev/null');
-    $cache[$command] = is_string($path) && trim($path) !== '';
+    // Callers execute the discovered command with exec(). A shell_exec-only
+    // probe can crash on hardened PHP, or claim availability when exec is disabled.
+    if (!function_exists('exec')) {
+        if (!$warnedExecUnavailable) {
+            say('WARN: PHP exec() is unavailable; system cron auditing, jq processing and WP-CLI updates requiring external commands are skipped.', true);
+            $warnedExecUnavailable = true;
+        }
+        return $cache[$command] = false;
+    }
+    $output = [];
+    $exitCode = 1;
+    @exec('command -v ' . escapeshellarg($command) . ' 2>/dev/null', $output, $exitCode);
+    $cache[$command] = $exitCode === 0 && trim(implode("\n", $output)) !== '';
     return $cache[$command];
 }
 
