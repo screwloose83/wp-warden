@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.83';
+const WP_WARDEN_VERSION = '0.1.84';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -103,6 +103,9 @@ $updateThemesAuto = isset($opts['update-themes-auto']) || $updateAllAuto;
 $wordfenceApiKeyFile = isset($opts['wordfence-api-key-file']) && is_string($opts['wordfence-api-key-file'])
     ? normalize_path($opts['wordfence-api-key-file'])
     : normalize_path(dirname(__DIR__) . '/wordfence-intelligence.key');
+$wordfenceFeedMirror = isset($opts['wordfence-feed-mirror']) && is_string($opts['wordfence-feed-mirror'])
+    ? trim($opts['wordfence-feed-mirror'])
+    : trim((string)getenv('WORDFENCE_INTEL_FEED_MIRROR'));
 $allowedWpContentDirsOverride = isset($opts['allow-wp-content-dir']) && is_string($opts['allow-wp-content-dir'])
     ? array_values(array_filter(array_map('trim', explode(',', $opts['allow-wp-content-dir']))))
     : [];
@@ -248,7 +251,7 @@ $state['timing']['update_health_seconds'] = round(microtime(true) - $updateStart
 
 if ($vulnerabilityScan) {
     $vulnStartedMicro = microtime(true);
-    $state['vulnerabilities'] = scan_vulnerabilities($wpRoot, $wpVersion, $intelDir, $wordfenceApiKeyFile);
+    $state['vulnerabilities'] = scan_vulnerabilities($wpRoot, $wpVersion, $intelDir, $wordfenceApiKeyFile, $wordfenceFeedMirror);
     $state['timing']['vulnerability_scan_seconds'] = round(microtime(true) - $vulnStartedMicro, 3);
 }
 
@@ -443,6 +446,7 @@ function print_help(): void {
     echo "  --update-themes-auto    Install available theme updates without prompting; requires --apply\n";
     echo "  --update-all-auto       Enable all three automatic WordPress update categories; requires --apply\n";
     echo "  --wordfence-api-key-file=FILE  Wordfence Intelligence V3 API key file (default ../wordfence-intelligence.key); WORDFENCE_INTEL_API_KEY env also supported\n";
+    echo "  --wordfence-feed-mirror=URL     Optional shared Wordfence feed mirror URL; WORDFENCE_INTEL_FEED_MIRROR env also supported; official feed remains fallback\n";
     echo "  --allow-wp-content-dir=a,b  Allow additional top-level wp-content directories (comma-separated)\n";
     echo "  --quarantine-wp-content-auto  With --apply and --quarantine, quarantine HIGH/CRITICAL unexpected wp-content directories\n";
     echo "  --debug-progress        Print each file path before scanning it\n";
@@ -6990,7 +6994,7 @@ function looks_like_core_path(string $rel): bool {
     ], true);
 }
 
-function scan_vulnerabilities(string $wpRoot, ?string $wpVersion, string $intelDir, string $wordfenceApiKeyFile): array {
+function scan_vulnerabilities(string $wpRoot, ?string $wpVersion, string $intelDir, string $wordfenceApiKeyFile, string $wordfenceFeedMirror = ''): array {
     $out = [
         'enabled'=>true,
         'status'=>'CLEAR',
@@ -7014,7 +7018,7 @@ function scan_vulnerabilities(string $wpRoot, ?string $wpVersion, string $intelD
         }
 
         if ($wfKey !== '') {
-            $feedPath = ensure_wordfence_scanner_feed_file($intelDir, $wfKey);
+            $feedPath = ensure_wordfence_scanner_feed_file($intelDir, $wfKey, $wordfenceFeedMirror);
             if ($feedPath !== null) {
                 $matchResult = match_wordfence_vulnerabilities_from_file(
                     $wpRoot,
@@ -7112,7 +7116,7 @@ function wordfence_cache_dir(string $intelDir): string {
     return $dir;
 }
 
-function ensure_wordfence_scanner_feed_file(string $intelDir, string $apiKey): ?string {
+function ensure_wordfence_scanner_feed_file(string $intelDir, string $apiKey, string $feedMirror = ''): ?string {
     $cacheDir = wordfence_cache_dir($intelDir);
     $cache = $cacheDir . '/wordfence-intelligence-v3-scanner.json';
     $stateFile = $cacheDir . '/wordfence-rate-limit.json';
@@ -7225,20 +7229,29 @@ function ensure_wordfence_scanner_feed_file(string $intelDir, string $apiKey): ?
         $tmp = $cache . '.tmp-' . getmypid() . '-' . bin2hex(random_bytes(4));
         $headersFile = $cacheDir . '/wordfence-last-headers.txt';
         $errorFile = $cacheDir . '/wordfence-last-error.txt';
-        $url = 'https://www.wordfence.com/api/intelligence/v3/vulnerabilities/scanner';
+        $officialUrl = 'https://www.wordfence.com/api/intelligence/v3/vulnerabilities/scanner';
+        $sources = [];
+        if ($feedMirror !== '') {
+            $sources[] = ['url' => $feedMirror, 'headers' => ['Accept: application/json'], 'label' => 'configured mirror'];
+        }
+        $sources[] = ['url' => $officialUrl, 'headers' => ['Authorization: Bearer ' . $apiKey, 'Accept: application/json'], 'label' => 'official endpoint'];
 
         say("Refreshing Wordfence Intelligence scanner feed (single shared request)...", true);
 
-        $download = stream_http_to_file_with_status(
-            $url,
-            $tmp,
-            [
-                'Authorization: Bearer ' . $apiKey,
-                'Accept: application/json',
-            ],
-            60,
-            $headersFile
-        );
+        $download = ['ok' => false, 'http_code' => 0, 'retry_after' => 0];
+        $downloadLabel = 'official endpoint';
+        foreach ($sources as $source) {
+            $download = stream_http_to_file_with_status($source['url'], $tmp, $source['headers'], 60, $headersFile);
+            $downloadLabel = $source['label'];
+            if (!empty($download['ok'])) {
+                say("Wordfence feed downloaded from {$downloadLabel}", true);
+                break;
+            }
+            @unlink($tmp);
+            if ($source['label'] === 'configured mirror') {
+                say("WARN: Wordfence feed mirror unavailable; falling back to official endpoint", true);
+            }
+        }
 
         $httpCode = (int)($download['http_code'] ?? 0);
         $retryAfter = (int)($download['retry_after'] ?? 0);

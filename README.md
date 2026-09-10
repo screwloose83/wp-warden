@@ -175,3 +175,8 @@ to trusted intel automatically: consensus does not prove a package is clean.
 
 Set `WP_WARDEN_RECOVER_MISSING_INTEL=0` to disable the trigger, or change the
 minimum with `WP_WARDEN_RECOVERY_MIN_COPIES`.
+
+
+## Shared Wordfence feed cache
+
+When several servers scan sites, point them at one internal HTTP cache or mirror for the Wordfence Intelligence scanner feed. Set `WORDFENCE_INTEL_FEED_MIRROR` on each server, or pass `--wordfence-feed-mirror=https://mirror.example.invalid/wordfence-intelligence-v3-scanner.json`. WP Warden validates the returned JSON, stores it in the normal local cache, and falls back to the official Wordfence endpoint if the mirror is unavailable. The mirror should serve the feed body as JSON and should not require the Wordfence API key.
