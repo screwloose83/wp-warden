@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.79';
+const WP_WARDEN_VERSION = '0.1.80';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -579,6 +579,7 @@ function load_php_pattern_rules(string $intelDir): array {
         'PHP_LEAFMAILER_FAMILY_001' => 5,
         'PHP_LEAFMAILER_PASSWORD_GATE_001' => 6,
         'PHP_CWP_PASSWORDLESS_ADMIN_LOGIN_001' => 7,
+        'PHP_GOTO_TMPFILE_STREAM_URI_COPY_DROPPER_001' => 8,
     ];
     foreach ($rules as $index => &$loadedRule) {
         $loadedRule['_load_order'] = $index;
@@ -3266,6 +3267,8 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
     }
     $require(in_array('PHP_PWDYT_GOTO_STRREV_REMOTE_EVAL_001', trusted_auto_quarantine_rule_ids(), true),
         'reviewed pwdyt remote-eval loader rule is trusted for automatic file quarantine');
+    $require(in_array('PHP_GOTO_TMPFILE_STREAM_URI_COPY_DROPPER_001', trusted_auto_quarantine_rule_ids(), true),
+        'reviewed goto tmpfile/copy dropper rule is trusted for automatic file quarantine');
     foreach ([
         'PHP_SITEBLOCK_HIDDEN_PLUGIN_LOADER_001',
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
@@ -5910,6 +5913,7 @@ function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes
         'PHP_ONYX_WRAPPER_RESTORER_001' => true,
         'PHP_ONYX_AERO_BRIDGE_IMPLANT_001' => true,
         'PHP_ONYX_STATUS_BEACON_001' => true,
+        'PHP_GOTO_TMPFILE_STREAM_URI_COPY_DROPPER_001' => true,
     ];
     $matchedIds = [];
 
@@ -6311,6 +6315,7 @@ function trusted_auto_quarantine_rule_ids(): array {
         'PHP_SITEBLOCK_CUSTOM_ALPHABET_IMAGE_EVAL_001',
         'PHP_PWDYT_GOTO_STRREV_REMOTE_EVAL_001',
         'PHP_GOTO_ESCAPED_DOUBLE_BASE64_EVAL_001',
+        'PHP_GOTO_TMPFILE_STREAM_URI_COPY_DROPPER_001',
         // Confirmed SC/Onyx family. These content-constrained signatures catch
         // additional copies hidden under arbitrary filenames during the scan.
         'PHP_SC_RESTORER_FAMILY_001',
