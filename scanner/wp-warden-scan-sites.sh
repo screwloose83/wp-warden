@@ -2,7 +2,7 @@
 set -u
 set -o pipefail
 
-WRAPPER_VERSION="0.1.80"
+WRAPPER_VERSION="0.1.82"
 
 REPO_ROOT="${WP_WARDEN_REPO_ROOT:-/root/wp-warden}"
 INTEL_ROOT="${WP_WARDEN_INTEL_ROOT:-${REPO_ROOT}/wp-warden-intel}"
@@ -495,7 +495,7 @@ fleet_ioc_sweep(){
 print_interactive_followup(){
  local SITE_ROOT="$1" QUARANTINE="$2"
  local -a CMD=(
-   php "$WARDEN" "$SITE_ROOT"
+   php -d disable_functions="" "$WARDEN" "$SITE_ROOT"
    "--intel-dir=$INTEL_ROOT"
    --verify-all
    --interactive
@@ -557,14 +557,14 @@ scan_site(){
  # Extra plugin/theme files are report-only by default. Premium/vendor checksum
  # sets can be incomplete, so their absence is not proof of malware.
  debug "Starting PHP scanner pass 1 for $DISPLAY_ID"
- PASS1_CMD=(php "$WARDEN" "$SITE_ROOT" "--intel-dir=$INTEL_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --cleanup-sc-onyx-auto --cleanup-malware-cron-auto --scan-processes --kill-malicious-processes-auto --quarantine-extra-core-auto --exclude-pdf --newest-first --max-size=1 --max-text-size=1 "--quarantine=$QUARANTINE")
+ PASS1_CMD=(php -d disable_functions="" "$WARDEN" "$SITE_ROOT" "--intel-dir=$INTEL_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --cleanup-sc-onyx-auto --cleanup-malware-cron-auto --scan-processes --kill-malicious-processes-auto --quarantine-extra-core-auto --exclude-pdf --newest-first --max-size=1 --max-text-size=1 "--quarantine=$QUARANTINE")
  [ -z "$RECENT_PHP_OPTION" ] || PASS1_CMD+=("$RECENT_PHP_OPTION")
  [ "$DEBUG" -ne 1 ] || PASS1_CMD+=(--debug-progress)
  "${PASS1_CMD[@]}" 2>&1 | tee -a "$SITE_LOG"
  CLEANUP_EXIT=${PIPESTATUS[0]}
  { echo; echo ">>> PASS 1 EXIT CODE: $CLEANUP_EXIT"; echo ">>> PASS 2: POST-CLEANUP VERIFY (cache enabled, no checksum refetch)"; } | tee -a "$SITE_LOG"
  debug "Starting PHP scanner pass 2 for $DISPLAY_ID"
- PASS2_CMD=(php "$WARDEN" "$SITE_ROOT" "--intel-dir=$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first --max-size=1 --max-text-size=1 --vulnerability-scan "--report-json=$REPORT")
+ PASS2_CMD=(php -d disable_functions="" "$WARDEN" "$SITE_ROOT" "--intel-dir=$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first --max-size=1 --max-text-size=1 --vulnerability-scan "--report-json=$REPORT")
  [ -z "$RECENT_PHP_OPTION" ] || PASS2_CMD+=("$RECENT_PHP_OPTION")
  [ "$DEBUG" -ne 1 ] || PASS2_CMD+=(--debug-progress)
  if [ "$SITE_UPDATE_REQUESTED" -eq 1 ]; then
@@ -743,10 +743,10 @@ check_server_processes(){
  line
  echo "Reading /proc directly; no account or WordPress enumeration."
  if [ "$MODE" = auto ]; then
-   php "$WARDEN" --intel-dir="$INTEL_ROOT" \
+   php -d disable_functions="" "$WARDEN" --intel-dir="$INTEL_ROOT" \
      --server-processes-only --kill-malicious-processes-auto --noninteractive --apply
  else
-   php "$WARDEN" --intel-dir="$INTEL_ROOT" \
+   php -d disable_functions="" "$WARDEN" --intel-dir="$INTEL_ROOT" \
      --server-processes-only --prompt-malicious-processes --interactive --apply
  fi
  return $?

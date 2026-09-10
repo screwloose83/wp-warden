@@ -144,6 +144,11 @@ available; a clean ZIP used as checksum intel is not installed automatically.
 
 ## Direct scanner example
 
+The Bash wrapper launches the scanner with `php -d disable_functions=""` so
+CLI command-dependent checks can run on hosts with disabled PHP functions.
+This applies to both scan passes, process-audit modes, and the printed
+interactive follow-up command. It does not modify website PHP settings.
+
 ```bash
 php /root/wp-warden/scanner/wp-warden-pef.php /home/site/public_html \
   --intel-dir=/root/wp-warden/wp-warden-intel \
