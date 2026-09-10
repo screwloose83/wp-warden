@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.81';
+const WP_WARDEN_VERSION = '0.1.83';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -3846,6 +3846,13 @@ function audit_wp_config_persistence(string $root): void {
 function sc_onyx_payload_matches(string $data): bool {
     if ($data === '') return false;
     return strpos($data, 'SCD1:') === 0
+        || (stripos($data, 'SCV:') !== false && stripos($data, 'SC_CORE_BOOT_VER') !== false
+            && stripos($data, 'sc_boot_ver') !== false && stripos($data, 'array_merge') !== false
+            && warden_preg_match('#/\*\s*SCV:\d+\.\d+\.\d+\s*\*/#i', $data) === 1)
+        || (stripos($data, 'SCOCV:') !== false && stripos($data, '.wp-object-cache-') !== false
+            && stripos($data, '__scf_') !== false && stripos($data, '_sc_fpc') !== false
+            && stripos($data, '/mu-plugins') !== false
+            && warden_preg_match('#/\*\s*\.wp-object-cache-[a-f0-9]{8,32}\s*\*/\s*/\*\s*SCOCV:\d+\.\d+\.\d+\s*\*/#i', $data) === 1)
         || (stripos($data, 'onyx-wrapper-tap') !== false && stripos($data, 'SCV:') !== false)
         || (stripos($data, 'Aero Bridge Pad') !== false && stripos($data, 'SC_CORE_BOOT_VER') !== false)
         || (stripos($data, 'SC_ADV_BEGIN:') !== false && stripos($data, 'onyx-wrapper-tap') !== false)
@@ -3952,18 +3959,50 @@ function cleanup_sc_onyx_tagged_php_carrier(string $root, string $path, string $
 }
 
 function sc_onyx_zip_matches(string $path): bool {
-    if (!class_exists('ZipArchive') || !is_file($path) || @filesize($path) > 16 * 1024 * 1024) return false;
+    if (!class_exists('ZipArchive') || !is_file($path) || is_link($path) || @filesize($path) > 16 * 1024 * 1024) return false;
     $zip = new ZipArchive();
     if (@$zip->open($path) !== true) return false;
     $matched = false;
+    $remaining = 8 * 1024 * 1024;
     for ($i = 0; $i < $zip->numFiles && $i < 100; $i++) {
         $name = (string)$zip->getNameIndex($i);
-        if (!warden_preg_match('#(?:^|/)onyx-wrapper-tap\.php$#i', $name)) continue;
-        $data = $zip->getFromIndex($i, 2 * 1024 * 1024);
+        if (!is_php_like_extension(strtolower(pathinfo($name, PATHINFO_EXTENSION)))) continue;
+        if ($remaining <= 0) break;
+        // Read member prefixes as inert bytes; never extract or execute them.
+        // Family headers are near the start even when the remainder is padded.
+        $limit = min(262144, $remaining);
+        $data = $zip->getFromIndex($i, $limit);
+        if (is_string($data)) $remaining -= strlen($data);
         if (is_string($data) && sc_onyx_payload_matches($data)) { $matched = true; break; }
     }
     $zip->close();
     return $matched;
+}
+
+function sc_onyx_related_markers(string $content, array $confirmed): array {
+    $slugs = [];
+    foreach ($confirmed as $path) {
+        if (!is_file($path) || is_link($path) || strtolower(pathinfo($path, PATHINFO_EXTENSION)) !== 'php') continue;
+        $data = @file_get_contents($path, false, null, 0, 262144);
+        if (!is_string($data)) continue;
+        // Slugs must be referenced by a content-confirmed implant, not inferred
+        // from an arbitrary hidden filename or a version string alone.
+        if (preg_match_all('#/\.(?:sd|pv|rd|bt|wr|swm|q)_([a-z0-9][a-z0-9_-]{1,80})#i', $data, $m)) {
+            foreach ($m[1] as $slug) $slugs[$slug] = true;
+        }
+    }
+    $markers = [];
+    foreach (array_keys($slugs) as $slug) {
+        foreach ([$content, $content . '/mu-plugins', $content . '/plugins/' . $slug, $content . '/' . $slug] as $dir) {
+            // Never follow a symlinked parent while collecting related state.
+            if (is_link($dir) || is_link(dirname($dir))) continue;
+            foreach (['sd','pv','rd','bt','wr','swm','q'] as $prefix) {
+                $path = $dir . '/.' . $prefix . '_' . $slug;
+                if (is_file($path) && !is_link($path) && @filesize($path) <= 4096) $markers[$path] = true;
+            }
+        }
+    }
+    return array_keys($markers);
 }
 
 function quarantine_confirmed_sc_onyx_path(string $root, string $path, string $qRoot): bool {
@@ -3990,17 +4029,23 @@ function audit_sc_onyx_persistence(string $root): void {
     if (!is_dir($content)) return;
     $confirmed = [];
     $taggedCarriers = find_sc_onyx_tagged_php_carriers($root);
-    foreach (['advanced-cache.php','db.php','bac4a7ce.php','735e7808.php','.735e7808.php','.htaccess','.user.ini'] as $name) {
+    foreach (['object-cache.php','advanced-cache.php','db.php','bac4a7ce.php','735e7808.php','.735e7808.php','.htaccess','.user.ini'] as $name) {
         $path = $content . '/' . $name;
         if (sc_onyx_file_matches($path)) $confirmed[$path] = true;
     }
-    foreach ([$content . '/mu-plugins/onyx-wrapper-tap.php', $content . '/plugins/onyx-wrapper-tap/onyx-wrapper-tap.php'] as $path) {
+    $pluginCandidates = array_merge((array)glob($content . '/mu-plugins/*.php'), (array)glob($content . '/plugins/*/*.php'));
+    foreach ($pluginCandidates as $path) {
+        if (is_link(dirname($path)) || is_link(dirname(dirname($path)))) continue;
         if (sc_onyx_file_matches($path)) $confirmed[$path] = true;
     }
     foreach ((array)glob($content . '/.wp-object-cache-*.dat*') as $path) {
         if (sc_onyx_file_matches($path)) $confirmed[$path] = true;
     }
-    foreach ((array)glob($content . '/*.zip') as $path) {
+    $archives = (array)glob($content . '/*.zip');
+    if ($archives && !class_exists('ZipArchive')) {
+        say('WARN: PHP ZIP extension is unavailable; SC/Onyx archive payload checks are skipped.', true);
+    }
+    foreach ($archives as $path) {
         if (sc_onyx_zip_matches($path)) $confirmed[$path] = true;
     }
     foreach ((array)glob($content . '/.sc_*') as $path) {
@@ -4039,6 +4084,15 @@ function audit_sc_onyx_persistence(string $root): void {
             'reason'=>'Legitimate PHP file contains a complete SC_TH-tagged Onyx self-restoring loader block.', 'file_action'=>false,
             'recommended_action'=>'Back up the file and remove only the matched SC_TH_BEGIN/SC_TH_END block.'
         ], false);
+    }
+    foreach (sc_onyx_related_markers($content, array_keys($confirmed)) as $path) {
+        add_finding([
+            'severity'=>'medium', 'type'=>'sc_onyx_related_state', 'rule_id'=>'BUILTIN_SC_RELATED_STATE_001',
+            'path'=>$path, 'relative_path'=>normalize_relative(substr($path, strlen(rtrim(normalize_path($root), '/')) + 1)),
+            'reason'=>'Small state/lock file associated with a content-confirmed SC-family implant; not an executable payload.',
+            'file_action'=>false, 'recommended_action'=>'Preserve or quarantine with the confirmed implant during coordinated cleanup.'
+        ], false);
+        $confirmed[$path] = true;
     }
     if (!$cleanupScOnyxAuto || !$apply || !$quarantineDir) return;
     $qRoot = rtrim(normalize_path($quarantineDir), '/') . '/sc-onyx-' . gmdate('Ymd-His');
@@ -5399,6 +5453,7 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
     } else {
         $size = @filesize($path);
         if (is_int($size) && $size > ($maxTextSizeMb * 1024 * 1024)) {
+            scan_large_php_prefix_safely($path, $rel, $hashes);
             stats_inc('files_skipped');
             say("[TEXT-SKIP] Regex scan skipped for large text candidate: $rel (" . round($size / 1048576, 2) . " MB)");
         } else {
@@ -5423,6 +5478,7 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
 }
 
 function scan_large_php_prefix_safely(string $path, string $rel, array $hashes): void {
+    global $intel;
     $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
     if (!is_php_like_extension($ext)) {
         return;
@@ -5434,6 +5490,12 @@ function scan_large_php_prefix_safely(string $path, string $rel, array $hashes):
     if (!is_string($data) || $data === '') {
         return;
     }
+
+    $familyRules = array_filter($intel['php_rules'] ?? [], static function (array $rule): bool {
+        return in_array($rule['id'] ?? '', ['PHP_SC_OBFUSCATED_CORE_001', 'PHP_SC_OBJECT_CACHE_RESTORER_001'], true);
+    });
+    scan_fast_trusted_family_rules($path, $rel, $hashes, $familyRules, $data);
+    if (!is_file($path)) return;
 
     $matches = null;
     if (stripos($data, 'eval') !== false
@@ -5910,6 +5972,7 @@ function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes
         'PHP_SC_SCD1_PACKED_CORE_001' => true,
         'PHP_SC_KNOWN_PREPEND_CONFIG_001' => true,
         'PHP_SC_OBFUSCATED_CORE_001' => true,
+        'PHP_SC_OBJECT_CACHE_RESTORER_001' => true,
         'PHP_ONYX_WRAPPER_RESTORER_001' => true,
         'PHP_ONYX_AERO_BRIDGE_IMPLANT_001' => true,
         'PHP_ONYX_STATUS_BEACON_001' => true,
@@ -6323,6 +6386,7 @@ function trusted_auto_quarantine_rule_ids(): array {
         'PHP_SC_SCD1_PACKED_CORE_001',
         'PHP_SC_KNOWN_PREPEND_CONFIG_001',
         'PHP_SC_OBFUSCATED_CORE_001',
+        'PHP_SC_OBJECT_CACHE_RESTORER_001',
         'PHP_ONYX_WRAPPER_RESTORER_001',
         'PHP_ONYX_AERO_BRIDGE_IMPLANT_001',
         'PHP_ONYX_STATUS_BEACON_001',

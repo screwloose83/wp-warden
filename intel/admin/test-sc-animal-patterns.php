@@ -21,7 +21,7 @@ $rules = [];
 foreach (json_decode(file_get_contents($root . '/intel/patterns/php-malware-rules.json'), true, 512, JSON_THROW_ON_ERROR)['rules'] as $rule) {
     if (preg_match('/^PHP_(?:SC_|ANIMAL_|ONYX_)/', $rule['id'])) $rules[] = prepare_php_pattern_rule($rule);
 }
-if (count($rules) !== 9) throw new RuntimeException('Expected nine family rules');
+if (count($rules) !== 10) throw new RuntimeException('Expected ten family rules');
 function check_data($label, $data, $expected = null, $path = __FILE__) {
     global $rules;
     $GLOBALS['hits'] = [];
