@@ -124,6 +124,8 @@ $state = [
     'started_at' => gmdate('c'),
     'target' => $target,
     'site_id' => $siteId,
+    'site_name' => isset($opts['site-name']) && is_string($opts['site-name']) && trim($opts['site-name']) !== ''
+        ? trim($opts['site-name']) : $siteId,
     'intel_dir' => $intelDir,
     'policy' => $policyId,
     'apply' => $apply,
@@ -401,6 +403,7 @@ function print_help(): void {
     echo "  --intel-dir=DIR         Extracted wp-warden-intel directory\n";
     echo "  --policy=ID             Policy id: default, apiscp, cwp\n";
     echo "  --site-id=ID            Site identifier for per-site whitelist\n";
+    echo "  --site-name=NAME        Display name for site reports (does not change whitelist ID)\n";
     echo "  --report-json=FILE      Also write a structured JSON report\n";
     echo "  --noninteractive        Cron-safe report mode\n";
     echo "  --interactive           Prompt for allowed actions\n";
@@ -8271,6 +8274,7 @@ function print_human_report(array $report, ?string $jsonPath): void {
     echo "================ WP Warden Summary ================" . PHP_EOL;
     echo "Target:       {$report['target']}" . PHP_EOL;
     echo "Site ID:      {$report['site_id']}" . PHP_EOL;
+    echo "Site name:    " . ($report['site_name'] ?? $report['site_id']) . PHP_EOL;
     echo "Policy:       {$report['policy']}" . PHP_EOL;
     echo "Started:      {$report['started_at']}" . PHP_EOL;
     echo "Finished:     {$report['finished_at']}" . PHP_EOL;

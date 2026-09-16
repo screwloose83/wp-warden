@@ -557,14 +557,14 @@ scan_site(){
  # Extra plugin/theme files are report-only by default. Premium/vendor checksum
  # sets can be incomplete, so their absence is not proof of malware.
  debug "Starting PHP scanner pass 1 for $DISPLAY_ID"
- PASS1_CMD=(php -d disable_functions="" "$WARDEN" "$SITE_ROOT" "--intel-dir=$INTEL_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --cleanup-sc-onyx-auto --cleanup-malware-cron-auto --scan-processes --kill-malicious-processes-auto --quarantine-extra-core-auto --exclude-pdf --newest-first --max-size=1 --max-text-size=1 "--quarantine=$QUARANTINE")
+ PASS1_CMD=(php -d disable_functions="" "$WARDEN" "$SITE_ROOT" "--site-name=$DISPLAY_ID" "--intel-dir=$INTEL_ROOT" --verify-all --repair-original-auto --apply --fetch-official-checksums --noninteractive --quarantine-malware-auto --cleanup-malware-users-auto --cleanup-database-persistence-auto --cleanup-sc-onyx-auto --cleanup-malware-cron-auto --scan-processes --kill-malicious-processes-auto --quarantine-extra-core-auto --exclude-pdf --newest-first --max-size=1 --max-text-size=1 "--quarantine=$QUARANTINE")
  [ -z "$RECENT_PHP_OPTION" ] || PASS1_CMD+=("$RECENT_PHP_OPTION")
  [ "$DEBUG" -ne 1 ] || PASS1_CMD+=(--debug-progress)
  "${PASS1_CMD[@]}" 2>&1 | tee -a "$SITE_LOG"
  CLEANUP_EXIT=${PIPESTATUS[0]}
  { echo; echo ">>> PASS 1 EXIT CODE: $CLEANUP_EXIT"; echo ">>> PASS 2: POST-CLEANUP VERIFY (cache enabled, no checksum refetch)"; } | tee -a "$SITE_LOG"
  debug "Starting PHP scanner pass 2 for $DISPLAY_ID"
- PASS2_CMD=(php -d disable_functions="" "$WARDEN" "$SITE_ROOT" "--intel-dir=$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first --max-size=1 --max-text-size=1 --vulnerability-scan "--report-json=$REPORT")
+ PASS2_CMD=(php -d disable_functions="" "$WARDEN" "$SITE_ROOT" "--site-name=$DISPLAY_ID" "--intel-dir=$INTEL_ROOT" --verify-all --noninteractive --exclude-pdf --newest-first --max-size=1 --max-text-size=1 --vulnerability-scan "--report-json=$REPORT")
  [ -z "$RECENT_PHP_OPTION" ] || PASS2_CMD+=("$RECENT_PHP_OPTION")
  [ "$DEBUG" -ne 1 ] || PASS2_CMD+=(--debug-progress)
  if [ "$SITE_UPDATE_REQUESTED" -eq 1 ]; then
@@ -659,12 +659,27 @@ discover_sites(){
     } | sort -u
 }
 
+# Resolve report labels without changing the scanner's whitelist identity.
+site_report_rows(){
+ jq -rs '
+   def domain:
+     (.site_name // "") as $name |
+     (.site_id // "") as $id |
+     if ($name != "" and $name != "public_html" and $name != "html") then $name
+     elif ($id != "" and $id != "public_html" and $id != "html") then $id
+     else ((.target // "") | rtrimstr("/") | split("/")) as $parts |
+       if $parts[-1] == "public_html" then $parts[-2]
+       elif ($parts[-3:] == ["var", "www", "html"]) then $parts[-4]
+       else (.target // $id) end
+     end;
+ '"$1" "${@:2}"
+}
+
 aggregate_health(){
  local -a reports=("${RUN_LOG_DIR}"/*-"${RUN_TIME}".json)
  [ -e "${reports[0]:-}" ] || return 0
  echo; line; echo " MISSING CHECKSUM INTEL - ALL SITES"; line
- jq -rs '
-   def domain: (.target|split("/")|.[3] // .site_id);
+ site_report_rows '
    [ .[] as $r | ($r.checksum_intel.missing_plugins // [])[] | . + {site:($r|domain)} ] | group_by(.slug,.version)[] | "PLUGIN\t\(.[0].slug)\t\(.[0].version)\t\(map(.site)|unique|join(", "))\t\(.[0].expected_intel)" ,
    [ .[] as $r | ($r.checksum_intel.missing_themes // [])[] | . + {site:($r|domain)} ] | group_by(.slug,.version)[] | "THEME\t\(.[0].slug)\t\(.[0].version)\t\(map(.site)|unique|join(", "))\t\(.[0].expected_intel)"
  ' "${reports[@]}" 2>/dev/null | sed $'s/\t/  /g'
@@ -672,14 +687,12 @@ aggregate_health(){
  line
  echo " VULNERABILITY HEALTH - ALL SITES"
  line
- jq -rs '
-   def domain: (.target|split("/")|.[3] // .site_id);
+ site_report_rows '
    .[] as $r |
    ($r.vulnerabilities.wordpress // [])[] |
    "\($r|domain)\tWORDPRESS\t\(.type)\t\(.slug)\t\(.installed)\t\(.title)\tpatched=\(.patched)"
  ' "${reports[@]}" 2>/dev/null | sort -u | sed $'s/\t/  /g'
- jq -rs '
-   def domain: (.target|split("/")|.[3] // .site_id);
+ site_report_rows '
    .[] as $r |
    ($r.vulnerabilities.composer // [])[] |
    "\($r|domain)\tCOMPOSER\t\(.package)\t\(.installed)\t\(.id)\t\(.summary)"
@@ -688,8 +701,7 @@ aggregate_health(){
  line
  echo " CONFIRMED IOCS - ALL SITES"
  line
- jq -rs '
-   def domain: (.target|split("/")|.[3] // .site_id);
+ site_report_rows '
    .[] as $r |
    ($r.findings // [])[] |
    select((.severity // "" | ascii_downcase) == "critical") |
@@ -697,8 +709,7 @@ aggregate_health(){
    "\($r|domain)\t\(.rule_id)\t\(.relative_path // .path // "")"
  ' "${reports[@]}" 2>/dev/null | sort -u | sed $'s/\t/  /g'
  echo; line; echo " UPDATE HEALTH - MANUAL REVIEW"; line
- jq -rs '
-   def domain: (.target|split("/")|.[3] // .site_id);
+ site_report_rows '
    .[] as $r |
    (if ($r.updates.core.outdated // false) then "CORE\t\($r|domain)\t\($r.updates.core.installed) -> \($r.updates.core.latest)" else empty end),
    (($r.updates.plugins // [])[] | select(.outdated==true) | "PLUGIN\t\($r|domain)\t\(.slug)\t\(.installed) -> \(.latest)"),

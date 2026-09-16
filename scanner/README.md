@@ -15,6 +15,12 @@ php wp-warden.php /home/site/public_html \
 
 By default, WP Warden prints a human-readable end summary. Add `--report-json=FILE` when you also want the full machine-readable report.
 
+The multi-site wrapper includes the resolved domain (or hosting account name if
+the domain is unavailable) in vulnerability, confirmed IOC file, checksum intel,
+and update reports. It passes `--site-name=NAME` to the stable scanner, which saves
+the label as `site_name` in JSON without changing the `site_id` used for whitelists.
+Older reports without a display name fall back to their site ID or hosting path.
+
 ## Scanner diagnostics and self-test (v0.1.75)
 
 If the wrapper appears idle before a site header is printed, enable timestamped
