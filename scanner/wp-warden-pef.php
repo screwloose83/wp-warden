@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.85';
+const WP_WARDEN_VERSION = '0.1.86';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -5268,6 +5268,88 @@ function is_cwp_login_compromise_filename(string $rel): bool {
     return warden_preg_match('/^cwp_login_[a-f0-9]{6,32}\.php$/i', basename($rel)) === 1;
 }
 
+// Match the reviewed installer as PHP tokens, never evaluating its payload.
+// The token fingerprint excludes comments/spacing but covers every executable
+// token in the opening hook and function; changed code is left for manual review.
+function maintenance_installer_prefix(string $data): ?array {
+    if (strpos($data, '_wp_load_compat_layer') === false) { return null; }
+    $canonical = [];
+    $offset = 0;
+    $depth = 0;
+    $inFunction = false;
+    $payloadVerified = false;
+    foreach (token_get_all($data) as $token) {
+        $text = is_array($token) ? $token[1] : $token;
+        $offset += strlen($text);
+        if (is_array($token)) {
+            $id = $token[0];
+            if (in_array($id, [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) { continue; }
+            if ($id === T_FUNCTION) { $inFunction = true; }
+            if ($id === T_OPEN_TAG) { $text = '<?php'; }
+            if ($id === T_CONSTANT_ENCAPSED_STRING) {
+                $decoded = base64_decode(substr($text, 1, -1), true);
+                if (is_string($decoded) && hash('sha256', $decoded) === 'bafe1d0dcadbe9c2e4f1cea5f61af5771ab60112adf7916d7ef421d88b446d5f') {
+                    $text = 'VERIFIED_MAINTENANCE_STEALER';
+                    $payloadVerified = true;
+                }
+            }
+            $canonical[] = [token_name($id), $text];
+        } else {
+            $canonical[] = $text;
+            if ($inFunction && $text === '{') { $depth++; }
+            if ($inFunction && $text === '}' && --$depth === 0) {
+                return $payloadVerified ? ['end' => $offset, 'fingerprint' => hash('sha256', json_encode($canonical))] : null;
+            }
+        }
+    }
+    return null;
+}
+
+function repair_maintenance_installer(string $path, string $rel, array $hashes): bool {
+    global $apply, $repairOriginalAuto, $state;
+    if (is_link($path)) { return false; }
+    $data = @file_get_contents($path);
+    if (!is_string($data)) { return false; }
+    $prefix = maintenance_installer_prefix($data);
+    if ($prefix === null || $prefix['fingerprint'] !== 'ead37166967f6586aeba3da141186db30f6a7972049b6e3cd94a6ab05139439b') { return false; }
+    add_finding([
+        'severity' => 'critical', 'type' => 'maintenance_credential_stealer_installer',
+        'rule_id' => 'BUILTIN_MAINTENANCE_STEALER_INSTALLER_001',
+        'path' => $path, 'relative_path' => $rel, 'hashes' => $hashes,
+        'file_action' => false,
+        'reason' => 'Confirmed injected init hook reinstalls the hidden maintenance password stealer.',
+        'recommended_action' => 'Use --apply --repair-original-auto to back up and remove only the verified injected prefix.',
+    ]);
+    if (!$apply || !$repairOriginalAuto) { return false; }
+    // Keep the PHP opening tag and every byte after the injected function.
+    $clean = '<?php' . substr($data, $prefix['end']);
+    try { token_get_all($clean, TOKEN_PARSE); } catch (ParseError $e) {
+        say("[REPAIR-FAIL] Remaining PHP does not parse: $rel", true); return false;
+    }
+    $backup = backup_before_repair($path, $rel);
+    if ($backup === null || @hash_file('sha256', $backup) !== hash('sha256', $data)) {
+        say("[REPAIR-FAIL] Verified backup unavailable: $rel", true); return false;
+    }
+    // Lock and recheck before writing so a concurrent edit is not overwritten.
+    $handle = @fopen($path, 'r+b');
+    if (!$handle) { return false; }
+    try {
+        if (!flock($handle, LOCK_EX) || stream_get_contents($handle) !== $data) { return false; }
+        rewind($handle);
+        if (fwrite($handle, $clean) !== strlen($clean) || !ftruncate($handle, strlen($clean)) || !fflush($handle)) {
+            rewind($handle);
+            $restored = fwrite($handle, $data) === strlen($data) && ftruncate($handle, strlen($data)) && fflush($handle);
+            say("[REPAIR-FAIL] $rel; original " . ($restored ? 'restored' : "requires restoration from $backup"), true);
+            return false;
+        }
+    } finally { fclose($handle); }
+    $state['actions'][] = ['type' => 'repair_maintenance_installer', 'path' => $path,
+        'relative_path' => $rel, 'backup' => $backup, 'at' => gmdate('c')];
+    $state['summary']['actions_taken']++;
+    say("[REPAIRED] Removed verified maintenance stealer installer: $rel (backup: $backup)", true);
+    return true;
+}
+
 function scan_one_file(string $root, string $path, string $rel, array $intel, array $coreChecksums, array $componentChecksums, bool $verifyAll): void {
     global $maxTextSizeMb, $maxSizeMb, $state;
 
@@ -5298,6 +5380,11 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
     }
     if (is_whitelisted($hashes, $intel['file_whitelist'])) {
         return;
+    }
+    if ($deepScanAllowed && is_php_like_extension(strtolower(pathinfo($rel, PATHINFO_EXTENSION)))
+        && repair_maintenance_installer($path, $rel, $hashes)) {
+        $hashes = file_hashes($path);
+        if (!$hashes) { return; }
     }
     if (is_cwp_login_compromise_filename($rel)) {
         add_finding([

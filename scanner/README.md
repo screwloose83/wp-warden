@@ -21,6 +21,22 @@ and update reports. It passes `--site-name=NAME` to the stable scanner, which sa
 the label as `site_name` in JSON without changing the `site_id` used for whitelists.
 Older reports without a display name fall back to their site ID or hosting path.
 
+## Maintenance installer repair (v0.1.86)
+
+The scanner also recognizes the reviewed `_wp_load_compat_layer` injection that
+recreates this stealer from a Base64 payload. `--apply --repair-original-auto`
+backs up the original under `--repair-backup=DIR` (or the default timestamped
+scanner repair-backup directory) and removes only the verified opening hook and
+function. The normal cleanup wrapper already supplies these repair flags.
+Custom theme code following the injection remains unchanged and is scanned after
+repair. The generated MU-plugin is handled by the credential-stealer quarantine
+rule; both components must be removed to stop persistence.
+
+Repair requires the reviewed executable-token fingerprint and decoded payload
+hash. Modified installer variants are not automatically repaired. Report-only
+mode does not edit files, and backup failure or invalid remaining PHP prevents
+repair. Test with `php intel/admin/test-maintenance-installer.php`.
+
 ## Scanner diagnostics and self-test (v0.1.75)
 
 Version 0.1.85 adds `PHP_WP_MAINTENANCE_CREDENTIAL_STEALER_001` for the hidden
