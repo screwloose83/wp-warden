@@ -23,6 +23,19 @@ Older reports without a display name fall back to their site ID or hosting path.
 
 ## Scanner diagnostics and self-test (v0.1.75)
 
+Version 0.1.85 adds `PHP_WP_MAINTENANCE_CREDENTIAL_STEALER_001` for the hidden
+maintenance-service login stealer that resolves its collector through Ethereum.
+It requires the combined authentication hook, checked plaintext password in the
+payload, success/add endpoints, blockchain lookup and MU-plugin hiding behavior.
+Report-only scans flag it as critical. With `--apply`, `--quarantine-malware-auto`
+and `--quarantine=DIR` (as used by the cleanup wrapper), the matched file is moved
+to quarantine. Update both the stable scanner and the intel rules to enable this.
+Quarantine does not reset stolen passwords or invalidate existing sessions.
+
+Run the inert regression test with `php intel/admin/test-maintenance-stealer.php`.
+It checks detection variants, negative controls and actual report/quarantine runs;
+the malware fixture is never executed.
+
 If the wrapper appears idle before a site header is printed, enable timestamped
 wrapper stages and detailed scanner progress:
 

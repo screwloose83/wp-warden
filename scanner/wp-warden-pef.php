@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.84';
+const WP_WARDEN_VERSION = '0.1.85';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -6367,6 +6367,7 @@ function maybe_interactive_action(array $finding, bool $quarantineCandidate): vo
 
 function trusted_auto_quarantine_rule_ids(): array {
     return [
+        'PHP_WP_MAINTENANCE_CREDENTIAL_STEALER_001',
         // High-confidence hidden WordPress administrator persistence family.
         // These IDs must be reviewed before being added here. Merely marking an
         // external/community rule CRITICAL is intentionally not sufficient.
