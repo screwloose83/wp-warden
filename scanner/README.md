@@ -21,7 +21,26 @@ and update reports. It passes `--site-name=NAME` to the stable scanner, which sa
 the label as `site_name` in JSON without changing the `site_id` used for whitelists.
 Older reports without a display name fall back to their site ID or hosting path.
 
+## Remote hidden-content injector detection (v0.1.88)
+
+`PHP_CONTENTBLOCK_REMOTE_HTML_INJECTOR_001` flags the reviewed Contentblock
+family as critical. It combines the remote-fetch, disabled TLS verification,
+hidden-div extraction, HTML insertion and output-buffer callback indicators.
+The payload URL is not fetched and is not required for detection, so changing
+the domain does not bypass this rule. Renamed/rewritten functions may require
+additional signatures; ordinary buffering or a hidden div alone is insufficient.
+
+This finding is report-only even with automatic cleanup enabled. Review and
+remove the injected block while retaining legitimate theme/application code.
+Run `php intel/admin/test-contentblock-injector.php` for inert regression tests.
+
 ## Maintenance installer repair (v0.1.86)
+
+Version 0.1.87 adds a bundled external-definition layer covering 14 curated PHP
+malware/webshell families from AntiHacker, alongside existing local and community
+rules. It runs automatically when the updated intel bundle is present. Matches
+require multiple indicators and remain report-only, even during automatic cleanup.
+See `intel/README.md` for provenance, update instructions and coverage limits.
 
 The scanner also recognizes the reviewed `_wp_load_compat_layer` injection that
 recreates this stealer from a Base64 payload. `--apply --repair-original-auto`

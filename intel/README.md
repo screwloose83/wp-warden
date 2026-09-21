@@ -102,6 +102,39 @@ PowerShell:
 
 The scanner loads both `patterns/php-malware-rules.json` and `patterns/community-malware-rules.json`.
 
+## Curated external definitions (scanner v0.1.87)
+
+The scanner additionally loads `patterns/external-malware-rules.json` automatically.
+The first bundle adapts 14 named PHP malware/webshell families from AntiHacker:
+Ajax Command Shell, Angel Shell, b374k, c100, c99, cyb3rsh3ll, r57, SimAttacker,
+Sosyete, WSO, Dark Shell, pseudo-Darkleech, malicious mailer and phpshell1.
+Each rule requires two selected indicators together. Broad upstream checks such
+as PHPMailer class names, security-site URLs and standalone system commands were
+not imported. This is a curated subset of 797 upstream records, not a complete
+AntiHacker or YARA engine, and does not guarantee detection of all variants.
+
+These findings are HIGH and report-only, including with automatic quarantine
+enabled. Their rule IDs are isolated from trusted cleanup IDs; the source URL,
+revision and original family are retained in JSON findings. Existing local rules
+may independently detect and remediate the same file. Normal size, exclusion,
+PHP-context and allowlist rules still apply. New definitions invalidate the
+relevant scan cache. No third-party code, SQL or malware is executed, and scans
+use the bundled definitions without fetching external feeds.
+
+To reproduce this bundle, download `assets/_rules.txt` from AntiHacker revision
+`cdab7d28f84cfc98bf248729404da6fc6468e559`, then run:
+
+```bash
+python3 intel/admin/import-antihacker.py /path/to/_rules.txt
+php intel/admin/test-external-definitions.php
+```
+
+The importer verifies the pinned source checksum before writing output. A new
+upstream revision requires reviewing the selections and updating the pin; it is
+not silently trusted. The other upstream rule files include malformed records
+and are not accepted by this importer. Attribution and license text ship in
+`patterns/ANTIHACKER-NOTICE.md` and `patterns/ANTIHACKER-LICENSE.txt`.
+
 ## Add Paid Plugin Checksums
 
 Use a clean vendor ZIP, not a copy taken from an infected server.

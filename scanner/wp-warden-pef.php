@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.86';
+const WP_WARDEN_VERSION = '0.1.88';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -532,6 +532,7 @@ function load_php_pattern_rules(string $intelDir): array {
     foreach ([
         "$intelDir/patterns/php-malware-rules.json",
         "$intelDir/patterns/community-malware-rules.json",
+        "$intelDir/patterns/external-malware-rules.json",
     ] as $path) {
         if (!is_file($path)) {
             say("WARN: PHP malware rule file not found: $path", true);
@@ -546,6 +547,13 @@ function load_php_pattern_rules(string $intelDir): array {
             }
 
             $fileCount++;
+
+            // External feed definitions cannot opt themselves into remediation,
+            // even by claiming a trusted local rule ID or report_only=false.
+            if (basename($path) === 'external-malware-rules.json') {
+                $rule['_external_report_only'] = true;
+                $rule['id'] = 'EXTERNAL_' . preg_replace('/^EXTERNAL_/', '', (string)($rule['id'] ?? 'UNNAMED'));
+            }
 
             // Disabled rules remain represented in the loaded count but are never
             // compiled or returned to the active scan loop.
@@ -2841,6 +2849,8 @@ function build_file_cache_context(array $intel, array $coreChecksums, array $com
             'type' => $rule['type'] ?? null,
             'pattern' => $rule['pattern'] ?? null,
             'anchors' => $rule['anchors'] ?? ($rule['anchor'] ?? null),
+            'report_only' => !empty($rule['_external_report_only']) || !empty($rule['report_only']),
+            'source_revision' => $rule['source_revision'] ?? null,
         ];
     }
 
@@ -3125,7 +3135,7 @@ function run_self_test(string $intelDir, int $slowRuleThresholdMs): int {
 
     $compiled = 0;
     $invalid = 0;
-    foreach (['php-malware-rules.json', 'community-malware-rules.json'] as $name) {
+    foreach (['php-malware-rules.json', 'community-malware-rules.json', 'external-malware-rules.json'] as $name) {
         $raw = @file_get_contents(rtrim($intelDir, '/') . '/patterns/' . $name);
         if (is_string($raw)) {
             $raw = preg_replace('/^\xEF\xBB\xBF/', '', $raw);
@@ -6023,6 +6033,9 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
                 'rule_id' => $rule['id'] ?? null,
                 'rule_pattern' => $pattern,
                 'rule_source' => $rule['source'] ?? $rule['category'] ?? null,
+                'source_revision' => $rule['source_revision'] ?? null,
+                'source_rule' => $rule['source_rule'] ?? null,
+                'file_action' => empty($rule['_external_report_only']) && empty($rule['report_only']),
                 'path' => $path,
                 'relative_path' => $rel,
                 'line' => is_int($matched) ? $matched : null,
