@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.88';
+const WP_WARDEN_VERSION = '0.1.90';
 const WP_WARDEN_CACHE_VERSION = '3';
 
 $opts = parse_args($argv);
@@ -368,6 +368,11 @@ say("Auditing system cron persistence...", true);
 audit_system_cron_persistence($wpRoot);
 say("Auditing symlinks...", true);
 audit_wordpress_symlinks($wpRoot, $intel);
+if ($verifyAll) {
+    require_once __DIR__ . '/core-directory-review.php';
+    say("Auditing extra core directories...", true);
+    audit_extra_core_directories($wpRoot, $coreChecksums, $intel);
+}
 say("Scanning files...", true);
 $scanStartedMicro = microtime(true);
 scan_tree($wpRoot, $intel, $coreChecksums, $componentChecksums);
@@ -3431,6 +3436,45 @@ function file_cache_mark_clean(string $path, string $rel): void {
     $fileCacheDirty = true;
 }
 
+// Preserve the existing JSON schema without materializing the entire encoded
+// cache alongside the in-memory map. Partial/failed writes never replace it.
+function write_file_cache_stream(string $path, array $metadata, array &$entries): bool {
+    $header = json_encode($metadata, JSON_UNESCAPED_SLASHES);
+    if (!is_string($header)) { return false; }
+    $tmp = $path . '.tmp.' . getmypid() . '.' . bin2hex(random_bytes(6));
+    $handle = @fopen($tmp, 'xb');
+    if ($handle === false) { return false; }
+    @chmod($tmp, 0600);
+    $write = static function (string $chunk) use ($handle): bool {
+        $length = strlen($chunk);
+        $offset = 0;
+        while ($offset < $length) {
+            $written = @fwrite($handle, $offset === 0 ? $chunk : substr($chunk, $offset));
+            if ($written === false || $written === 0) { return false; }
+            $offset += $written;
+        }
+        return true;
+    };
+    $ok = false;
+    try {
+        if (!$write(substr($header, 0, -1) . ',"entries":{')) { return false; }
+        $separator = '';
+        foreach ($entries as $rel => $entry) {
+            $key = json_encode((string)$rel, JSON_UNESCAPED_SLASHES);
+            $value = json_encode($entry, JSON_UNESCAPED_SLASHES);
+            if (!is_string($key) || !is_string($value) || !$write($separator . $key . ':' . $value)) { return false; }
+            $separator = ',';
+        }
+        $ok = $write("}}\n") && @fflush($handle);
+    } finally {
+        $closed = fclose($handle);
+        if (!$ok || !$closed) { @unlink($tmp); }
+    }
+    if (!$ok || !$closed) { return false; }
+    if (!@rename($tmp, $path)) { @unlink($tmp); return false; }
+    return true;
+}
+
 function save_file_cache(): void {
     global $fileCacheEnabled, $fileCacheDir, $fileCachePath, $fileCacheSignature,
            $fileCacheEntries, $fileCacheSeen, $fileCacheDirty, $wpRoot, $state;
@@ -3440,12 +3484,13 @@ function save_file_cache(): void {
     }
 
     // Prune files no longer encountered during this walk.
-    foreach (array_keys($fileCacheEntries) as $rel) {
+    foreach ($fileCacheEntries as $rel => &$entry) {
         if (!isset($fileCacheSeen[$rel])) {
             unset($fileCacheEntries[$rel]);
             $fileCacheDirty = true;
         }
     }
+    unset($entry);
 
     $state['summary']['cache_entries'] = count($fileCacheEntries);
 
@@ -3466,21 +3511,10 @@ function save_file_cache(): void {
         'signature' => $fileCacheSignature,
         'target' => normalize_path(realpath($wpRoot) ?: $wpRoot),
         'updated_at' => gmdate('c'),
-        'entries' => $fileCacheEntries,
     ];
 
-    $tmp = $fileCachePath . '.tmp.' . getmypid();
-    $json = json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-    if (!is_string($json) || @file_put_contents($tmp, $json, LOCK_EX) === false) {
-        @unlink($tmp);
+    if (!write_file_cache_stream($fileCachePath, $payload, $fileCacheEntries)) {
         say("WARN: could not write file cache: $fileCachePath", true);
-        return;
-    }
-
-    @chmod($tmp, 0600);
-    if (!@rename($tmp, $fileCachePath)) {
-        @unlink($tmp);
-        say("WARN: could not install file cache: $fileCachePath", true);
         return;
     }
 

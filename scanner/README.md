@@ -21,6 +21,52 @@ and update reports. It passes `--site-name=NAME` to the stable scanner, which sa
 the label as `site_name` in JSON without changing the `site_id` used for whitelists.
 Older reports without a display name fall back to their site ID or hosting path.
 
+## Cache-save memory fix (v0.1.90)
+
+Clean-file cache saving now streams JSON entries to a temporary file and replaces
+the cache only after a successful write. It no longer builds a second, potentially
+large pretty-printed JSON copy of the complete cache in memory. Existing cache
+files and the cache schema remain compatible. Failed encoding/writes leave the
+previous cache intact. Test: `php intel/admin/test-file-cache-memory.php`.
+
+If an older scanner exhausts memory in `save_file_cache()` / `json_encode()`, use
+`--no-file-cache` on the direct PHP scanner command until updated. This disables
+clean-file cache reads/writes, not malware checks. The change reduces cache-save
+overhead; loading caches and retaining findings still require memory proportional
+to their size.
+
+## Extra core directory review (v0.1.89)
+
+`--verify-all` derives the expected `wp-admin` and `wp-includes` directory tree
+from the loaded WordPress core file checksum manifest. It reports each outermost
+unexpected directory as HIGH, including empty trees. Nested directories are
+grouped under that finding. This audit runs before file scanning, independently
+of file size, modification time and the clean-file cache. Policy path exclusions
+still apply. A missing or obviously incomplete manifest skips this audit with a
+warning; use the complete checksum set for the installed WordPress version.
+
+`--interactive` offers V (list up to 100 contents) and S (skip). With `--apply`,
+Q moves the entire tree to `--quarantine=DIR` and D permanently deletes it.
+Quarantine must be outside the WordPress root. Actions refuse official core
+directories, traversal paths, links and cross-filesystem trees. An unreadable or
+changed tree stops cleanup and reports the failure. JSON records the directory
+finding and action result. Noninteractive runs only report these directories;
+existing automatic file cleanup flags do not authorize whole-tree deletion.
+
+For the directory trees discussed, use:
+
+```bash
+php -d disable_functions="" /root/wp-warden/scanner/wp-warden-pef.php \
+  /home/downsout/public_html \
+  --intel-dir=/root/wp-warden/wp-warden-intel \
+  --fetch-official-checksums --verify-all --interactive --apply \
+  --quarantine=/home/downsout/q
+```
+
+Update the complete scanner directory (including `core-directory-review.php`),
+normally through the wrapper's `--self-update`. Regression tests:
+`php intel/admin/test-extra-core-directories.php`.
+
 ## Remote hidden-content injector detection (v0.1.88)
 
 `PHP_CONTENTBLOCK_REMOTE_HTML_INJECTOR_001` flags the reviewed Contentblock
