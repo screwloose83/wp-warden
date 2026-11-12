@@ -21,6 +21,21 @@ and update reports. It passes `--site-name=NAME` to the stable scanner, which sa
 the label as `site_name` in JSON without changing the `site_id` used for whitelists.
 Older reports without a display name fall back to their site ID or hosting path.
 
+## NXDROP health-check dropper (v0.1.91)
+
+`PHP_NXD_HEALTHCHECK_BASE64_DROPPER_001` detects the reviewed fake health-check
+plugin as critical. It requires the hardcoded `_nxd` request gate, POST `d`
+Base64-to-file write, adjacent randomized `objcache-*.php` destination and both
+NXDROP status markers. The hardcoded token and filename suffix may change without
+preventing detection. Other rewrites may need additional signatures.
+
+With `--apply --quarantine-malware-auto --quarantine=DIR`, the scanner quarantines
+the containing `wp-content/plugins/wp-hc-<hex>/` tree, preserving adjacent dropped
+payloads and hidden files. At MU-plugin paths or other plugin locations it moves
+only the matching dropper; inspect adjacent payloads separately. Without cleanup
+flags the finding is report-only. Update both the scanner and malware definitions.
+Test: `php intel/admin/test-nxd-healthcheck-dropper.php`.
+
 ## Cache-save memory fix (v0.1.90)
 
 Clean-file cache saving now streams JSON entries to a temporary file and replaces

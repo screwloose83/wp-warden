@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.90';
+const WP_WARDEN_VERSION = '0.1.91';
 const WP_WARDEN_CACHE_VERSION = '4';
 
 $opts = parse_args($argv);
@@ -6516,6 +6516,7 @@ function maybe_interactive_action(array $finding, bool $quarantineCandidate): vo
 
 function trusted_auto_quarantine_rule_ids(): array {
     return [
+        'PHP_NXD_HEALTHCHECK_BASE64_DROPPER_001',
         'PHP_WP_MAINTENANCE_CREDENTIAL_STEALER_001',
         // High-confidence hidden WordPress administrator persistence family.
         // These IDs must be reviewed before being added here. Merely marking an
@@ -6709,6 +6710,12 @@ function maybe_auto_quarantine_malware_finding(array $finding): bool {
 
 function trusted_rule_should_quarantine_plugin_directory(array $finding): bool {
     $ruleId = (string)($finding['rule_id'] ?? '');
+    if ($ruleId === 'PHP_NXD_HEALTHCHECK_BASE64_DROPPER_001') {
+        // Quarantine the complete fake wp-hc plugin, including adjacent dropped
+        // files. In shared/custom plugin paths or MU-plugins, move only the match.
+        return warden_preg_match('#^wp-content/plugins/wp-hc-[a-f0-9]{6,32}/#i',
+            normalize_relative((string)($finding['relative_path'] ?? ''))) === 1;
+    }
     if (!in_array($ruleId, [
         'PHP_WPHIDDENBOT_PERSISTENCE_001',
         'PHP_WPHIDDENBOT_HIDE_USER_003',
