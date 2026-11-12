@@ -13,6 +13,25 @@ the programs rather than encoded in the command filename.
 
 WP Warden is designed for ApisCP/CWP style multi-server WordPress administration. It favors trusted checksum intel first, then targeted malware heuristics and interactive repair/quarantine actions.
 
+`--verify-all` also reviews files outside the available core, plugin and theme
+checksum lists throughout the scanned tree, including root files, hidden folders,
+custom directories and mu-plugins. These appear as `unverified_site_file` (high
+for executable extensions, medium otherwise), with interactive quarantine,
+delete, allowlist and skip choices when `--apply` is enabled. Missing package
+coverage does not prove malware, so these findings are not eligible for automatic
+extra-core or extra-plugin/theme quarantine. Local configuration files and
+non-executable uploads, cache, upgrade and translation assets are exempt from
+this additional review; normal malware checks still apply to scanned files.
+Configured path exclusions and optional recent-file/PDF filters still apply.
+The standard site wrapper already enables `--verify-all`.
+
+Active `auto_prepend_file` and `auto_append_file` directives in scanned `.user.ini`,
+`php.ini` and `.htaccess` files are reported as high-severity
+`php_configuration_hook` findings with their target paths, even without
+`--verify-all`. Legitimate firewall hooks also require review. These findings
+offer guidance to inspect the target and edit the directive; they do not offer
+whole-file deletion or automatic quarantine of the configuration file.
+
 On ApisCP, wrapper discovery checks both the primary `var/www/html` document
 root and immediate `var/www/<domain-or-subdomain>` roots containing a
 `wp-config.php`. Physical roots exposed through multiple ApisCP aliases are

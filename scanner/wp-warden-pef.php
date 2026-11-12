@@ -8,7 +8,7 @@
  */
 
 const WP_WARDEN_VERSION = '0.1.90';
-const WP_WARDEN_CACHE_VERSION = '3';
+const WP_WARDEN_CACHE_VERSION = '4';
 
 $opts = parse_args($argv);
 $serverProcessesOnlyRequested = isset($opts['server-processes-only']);
@@ -4938,7 +4938,7 @@ function scan_tree(string $root, array $intel, array $coreChecksums, array $comp
         //   - zero-byte index.php
         //   - "<?php // Silence is golden." (or equivalent block-comment form)
         // This runs before hashing/rule evaluation for a small recurring speed win.
-        if (is_benign_index_placeholder($path, $rel)) {
+        if (!$verifyAll && is_benign_index_placeholder($path, $rel)) {
             stats_inc('files_skipped');
             stats_inc('benign_index_skipped');
             if ($debugProgress) {
@@ -5544,6 +5544,20 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
             if (maybe_auto_quarantine_extra_file($extraFinding)) {
                 return;
             }
+        }
+    }
+
+    if ($verifyAll && !isset($coreChecksums[$rel]) && !looks_like_core_path($rel)
+        && !$component && !component_context_for_path($rel, $componentChecksums)) {
+        $review = unverified_site_file_review($rel);
+        if ($review !== null) {
+            add_finding(array_merge($review, [
+                'path' => $path,
+                'relative_path' => $rel,
+                'hashes' => $hashes,
+                'recommended_action' => 'Review against a trusted site backup or package. Quarantine or delete only after confirming the file is unwanted; allowlist known custom files.',
+            ]), true);
+            if (!is_file($path)) { return; }
         }
     }
 
@@ -6184,6 +6198,7 @@ function should_run_external_php_rules(string $rel, string $data): bool {
 }
 
 function scan_builtin_text_heuristics(string $path, string $rel, array $hashes, string $data): void {
+    scan_php_configuration_hooks($path, $rel, $hashes, $data);
     $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
 
     $isPhpLike = is_php_like_extension($ext);
@@ -7109,6 +7124,63 @@ function fast_relative_path(string $rootNorm, string $path): string {
 
 function normalize_relative(string $path): string {
     return ltrim(normalize_path($path), '/');
+}
+
+function scan_php_configuration_hooks(string $path, string $rel, array $hashes, string $data): void {
+    if (!in_array(strtolower(basename($rel)), ['.user.ini', 'php.ini', '.htaccess'], true)) {
+        return;
+    }
+    if (!preg_match_all('/^\h*(?:(?:php_value|php_admin_value)\h+)?(auto_prepend_file|auto_append_file)\h*(?:=\h*|\h+)([^\r\n]+)/mi', $data, $matches, PREG_SET_ORDER)) {
+        return;
+    }
+    foreach ($matches as $match) {
+        $value = trim($match[2]);
+        if ($value === '' || $value[0] === ';' || $value[0] === '#') { continue; }
+        if ($value[0] === '"' || $value[0] === "'") {
+            $end = strpos($value, $value[0], 1);
+            $target = $end === false ? $value : substr($value, 1, $end - 1);
+        } else {
+            $target = trim(preg_split('/[;#]/', $value, 2)[0]);
+        }
+        if ($target === '' || strcasecmp($target, 'none') === 0) { continue; }
+        add_finding([
+            'severity' => 'high',
+            'type' => 'php_configuration_hook',
+            'rule_id' => 'BUILTIN_PHP_CONFIGURATION_HOOK_001',
+            'path' => $path,
+            'relative_path' => $rel,
+            'hashes' => $hashes,
+            'directive' => strtolower($match[1]),
+            'target' => $target,
+            'reason' => $match[1] . ' automatically executes PHP from: ' . $target . '. This can be legitimate (for example a firewall) or malicious persistence.',
+            'file_action' => false,
+            'recommended_action' => 'Inspect the referenced file and remove only the malicious directive after backup. Do not delete the entire configuration file. Targets outside the scan root require separate inspection.',
+        ], false);
+    }
+}
+
+// Outside package manifests, absence is evidence for review, not proof of malware.
+// Keep these findings separate from extra_core_file so automatic core cleanup
+// cannot remove legitimate site configuration, custom code or generated assets.
+function unverified_site_file_review(string $rel): ?array {
+    $rel = normalize_relative($rel);
+    if (in_array($rel, ['wp-config.php', '.htaccess', 'web.config', '.user.ini', 'php.ini', 'robots.txt'], true)) {
+        return null;
+    }
+    $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
+    $executable = is_php_like_extension($ext)
+        || in_array($ext, ['pl', 'py', 'sh', 'cgi'], true);
+    // User media and generated translations/caches have no package file list.
+    // Executables still require review wherever they are found.
+    if (!$executable && preg_match('#^wp-content/(?:uploads|cache|upgrade|languages)/#', $rel)) {
+        return null;
+    }
+    return [
+        'severity' => $executable ? 'high' : 'medium',
+        'type' => 'unverified_site_file',
+        'rule_id' => 'BUILTIN_UNVERIFIED_SITE_FILE_001',
+        'reason' => 'File is outside the available trusted core/plugin/theme file lists. It may be a legitimate custom file; its absence from those lists does not prove malware.',
+    ];
 }
 
 function looks_like_core_path(string $rel): bool {
