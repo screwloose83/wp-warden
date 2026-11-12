@@ -21,6 +21,20 @@ and update reports. It passes `--site-name=NAME` to the stable scanner, which sa
 the label as `site_name` in JSON without changing the `site_id` used for whitelists.
 Older reports without a display name fall back to their site ID or hosting path.
 
+## NOX Googlebot cloaking loader (v0.1.92)
+
+`PHP_NOX_GOOGLEBOT_CLOAK_LOADER_001` identifies the deployed NOX loader as
+critical using its Google crawler selection, render.lock gate, output-buffer
+clearing and hidden `.nox-content` HTML response replacement. Account paths,
+payload names and variable names may vary. Malware findings take precedence over
+the generic unverified-site-file review prompt.
+
+This signature requires manual cleanup: remove the malicious prepend directive
+and let PHP configuration refresh before quarantining its target, to avoid PHP
+requests failing on a missing prepend file. It is not enabled for automatic
+quarantine. Inspect hidden content outside the WordPress scan root separately.
+Test: `php intel/admin/test-nox-cloak-loader.php`.
+
 ## NXDROP health-check dropper (v0.1.91)
 
 `PHP_NXD_HEALTHCHECK_BASE64_DROPPER_001` detects the reviewed fake health-check

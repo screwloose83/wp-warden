@@ -7,7 +7,7 @@
  * Noninteractive runs are report-only unless --apply is supplied.
  */
 
-const WP_WARDEN_VERSION = '0.1.91';
+const WP_WARDEN_VERSION = '0.1.92';
 const WP_WARDEN_CACHE_VERSION = '4';
 
 $opts = parse_args($argv);
@@ -5547,20 +5547,6 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
         }
     }
 
-    if ($verifyAll && !isset($coreChecksums[$rel]) && !looks_like_core_path($rel)
-        && !$component && !component_context_for_path($rel, $componentChecksums)) {
-        $review = unverified_site_file_review($rel);
-        if ($review !== null) {
-            add_finding(array_merge($review, [
-                'path' => $path,
-                'relative_path' => $rel,
-                'hashes' => $hashes,
-                'recommended_action' => 'Review against a trusted site backup or package. Quarantine or delete only after confirming the file is unwanted; allowlist known custom files.',
-            ]), true);
-            if (!is_file($path)) { return; }
-        }
-    }
-
     $magic = sniff_magic($path);
     if (in_array($magic, ['ELF', 'PE', 'MACHO'], true)) {
         $severity = binary_location_suspicious($rel) ? 'critical' : 'high';
@@ -5593,6 +5579,7 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
     // PCRE malware signatures against those files can cause pathological regex CPU use.
     // Keep normal hashing/integrity handling above, but use a token-based safety scan
     // here instead of the generic regex engine.
+    $contentFindingsBefore = count($state['findings']);
     if (!$deepScanAllowed) {
         // Metadata, checksum, location and magic checks above have completed.
         // Do not load an arbitrarily large file into memory for deep inspection.
@@ -5613,6 +5600,23 @@ function scan_one_file(string $root, string $path, string $rel, array $intel, ar
             if ($textData !== null) {
                 scan_text_rules($path, $rel, $hashes, $intel['php_rules'], $textData);
             }
+        }
+    }
+
+    // Let a decisive malware signature reach the operator before a generic
+    // unverified-file prompt; do not label detected malware merely unverified.
+    if (is_file($path) && count($state['findings']) === $contentFindingsBefore
+        && $verifyAll && !isset($coreChecksums[$rel]) && !looks_like_core_path($rel)
+        && !$component && !component_context_for_path($rel, $componentChecksums)) {
+        $review = unverified_site_file_review($rel);
+        if ($review !== null) {
+            add_finding(array_merge($review, [
+                'path' => $path,
+                'relative_path' => $rel,
+                'hashes' => $hashes,
+                'recommended_action' => 'Review against a trusted site backup or package. Quarantine or delete only after confirming the file is unwanted; allowlist known custom files.',
+            ]), true);
+            if (!is_file($path)) { return; }
         }
     }
 
@@ -6106,6 +6110,7 @@ function scan_text_rules(string $path, string $rel, array $hashes, array $rules,
 
 function scan_fast_trusted_family_rules(string $path, string $rel, array $hashes, array $rules, string $data): array {
     $fastIds = [
+        'PHP_NOX_GOOGLEBOT_CLOAK_LOADER_001' => true,
         'PHP_AXIL_QUERY_PARENT_UPLOAD_BACKDOOR_001' => true,
         'PHP_FRAGMENTED_SELF_TAIL_GZIP_EVAL_001' => true,
         'PHP_FRAGMENTED_ROT13_GZINFLATE_EVAL_001' => true,
